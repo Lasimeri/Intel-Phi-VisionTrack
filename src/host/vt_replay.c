@@ -137,6 +137,16 @@ int main(int argc, char **argv)
     }
     if (fgcheck)
         fprintf(stderr, "fgcheck %s: over the thing, dB: generated %.2f, older frame again %.2f, the two averaged %.2f; whole picture: generated %.2f, older frame again %.2f, the two averaged %.2f\n", ds.s.name, psnr(fg_thing.gen, fg_thing.n), psnr(fg_thing.repeat, fg_thing.n), psnr(fg_thing.mean, fg_thing.n), psnr(fg_whole.gen, fg_whole.n), psnr(fg_whole.repeat, fg_whole.n), psnr(fg_whole.mean, fg_whole.n));
+    /* --gate here as well: scenes can be judged with no card at all. */
+    int bad = 0;
+    if (o.gate) {
+        FILE *nul = fopen("/dev/null", "w");
+        if (nul) {
+            score_print(s, nul, "replay", o.nframes * cams, 0, 0.0, "\"replay\":1,");
+            fclose(nul);
+        }
+        bad = score_gate(s, stderr);
+    }
     dataset_close(&ds);
-    return 0;
+    return bad ? 1 : 0;
 }

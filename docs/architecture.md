@@ -44,53 +44,29 @@ Ingest runs on a free hardware thread of a reserved core, found at run time, so 
 
 An operator's drag holds the thing and whatever is around it. The first tracker took the median motion of all it held, so when most of the box was background the region sat on the background reading OBSERVED while the thing walked away: 187.98 px behind with continuity 1.00 in the scene that was added to show it. Nothing had caught this, since every scene until then selected from inside the object. Numbers: [measurements.md](measurements.md).
 
-**The region is a rigid model and a set of members.** The model is a centre, a scale and a rotation: a feature with anchor A sits at c + [a -b; b a] A.
+**What runs now: the first tracker's median, on a virtual gimbal (the operator's direction, 2026-11-03).** Two designs came between. A rigid region model held the known scenes well and stood still on real targets, because its assumptions suited a camera on a gimbal. An inversion, tracking what differs from a fixed-camera background, passed all 79 gates of its day and failed live at once: its box covered over half the picture on 32.9, 28.5 and 71.8 % of L, R and D's results. The operator's order was to go back to the older method that had worked and give it a gimbal in software. The head points, and the window is where it points. Nothing on the rig moves.
 
 | Part | What it does | What it replaced, and why |
 | --- | --- | --- |
-| Claims | each member says where the centre is, given where it stands; the mode of the claims, weighted to the box's middle, is the majority | medians of frame-to-frame motion, summed. Summing kept every frame's error for good; L's still target crawled 21.5 px in 39 s reading OBSERVED |
-| Parting | a member that moves differently disagrees more with every frame, however slowly, so no per-frame threshold is needed | outliers against a median that was the background's |
-| Fit | least squares over those explained; scale and rotation change only if a feature at the typical radius would move over 0.25 px | a per-frame median stretch whose noise pushed a still region along |
-| Forgiveness | an agreeing member's anchor gives way 3 % a frame, so a slowly changing shape keeps its features | |
-| Founders | corners in the middle half of the drag are members from the first frame | every corner in the box voted from the first frame |
-| Riders | every other corner rides without a vote for 8 frames and joins if it stayed with the model. A closed region moving under 0.1 px a frame proves nothing and takes none in | |
-| A second thing | whatever differs from the majority gets a model of its own, fitted to all of it and narrowed three times. A clump of claims under the old model would not do: a thing that turns has none | |
-| Waking | if the majority is still and the second thing is near the middle and moves for 3 frames, it is what was selected; nothing is thrown out during that trial | |
-| Closing | the box closes on the members when that happens, when a member group parts from a moving majority, or when a moving region throws out riders. Afterwards it follows the members, and looks 1.6 times beyond itself for more of the thing, never past the operator's box | the box stayed as drawn, and detection kept running over all of it |
-| The centre | stays on the point the operator chose, unless a thing found in the box does not hold that point; only then does it go to the thing, and go on refining | |
+| The median | the first tracker's: median displacement of the voters, scale and turn from the median stretch about them, and whatever lies over 3 MAD or 0.5 px from that dropped | a rigid model fitted to members, with anchors, which a real non-rigid mover broke apart |
+| The head | its speed is every feature's starting guess in LK. The target then stands about still in the head's view while the background streaks past and fails the MAD test by itself | LK's zero guess, which lost what moved fast |
+| At rest | a head that has not moved, or has parked, takes no median, so nothing integrates noise: `hold` reads 0.000 px | summing, then a held frame |
+| Starting | at least `min_features` features whose remembered motion is over 2.5 px, coherent with each other, for 3 real frames. Still features cannot outvote them, and are dropped when it starts | a 15 % share of the votes and one rigid fit |
+| Catching up | at the start the window jumps by the median distance moved by the features that were there from the beginning. Later ones travelled less and would hold it short: 3.2 to 3.3 px on three scenes before this | |
+| Looking there | a big box holds few features on a small thing, 5 or 6 of 128 on one scene. When at least 3 features have moved or died in the flow, and too few are moving to start the head, every other still feature gives way to new ones around that place. Deaths count, since blur kills a feature rather than moving it | founders taken only from the box's inner half |
+| Outsiders | a feature that moved before it had settled was born moving, and motion first seen at the box's edge after the first 15 frames came from outside. Neither can start the head, which is what `passby` holds | |
+| Riders | a new feature has no vote until the head has gone 2 px since its birth; it is then dropped unless it went with the head to within half that distance. At 8 px it votes that same frame, since at speed it may not live to the next | riders graduating by age, which is how the background became the majority |
+| Parking | under 0.1 px a frame for 15 real frames. A parked head starts again only if at least half its voters moved, so a part of the thing waving does not move the window | |
+| The box | closes once when the head first moves, then goes half way each frame to the members' span times 1.25 plus 8 px, never past the operator's box. The centre stays on the point chosen, unless that lies outside the members' span, or their scatter (MAD over 1 px) says the thing is not rigid: it then settles toward their middle at 5 % a frame | the box as drawn, which the operator found too padded |
+| Generated frames | move the features and decide nothing | |
 
 **Corners are judged where they stand.** The Harris response goes as the gradient to the fourth power, so against one threshold for the box, a sharp corner on an object's outline, whose patch straddles two motions, erased everything inside the object: 11 corners in 384 x 307, and a region lagging 18 %. Now each corner answers to the strongest of its 16 x 16 cell and the eight around it, above a floor. Small boxes space their features closer, down to 6 px, so a small thing gets enough.
 
-**Detection is on the team.** It ran on the tracking thread: 6.1 to 8.0 ms for 384 x 307, on every frame while features were low, and judging corners by neighbourhood took it to 26.37 ms on a selection frame. The tensor, response and cell stages now run on all threads on rows that do not depend on each other, and the last stage scans a vector at a time and orders candidates by a radix sort over the complement of their score's bits, integers only. 3.78 ms. Reseeding now counts members, not riders, and waits at least 4 frames.
+**Detection is on the team.** It ran on the tracking thread: 6.1 to 8.0 ms for 384 x 307, on every frame while features were low, and judging corners by neighbourhood took it to 26.37 ms on a selection frame. The tensor, response and cell stages now run on all threads on rows that do not depend on each other, and the last stage scans a vector at a time and orders candidates by a radix sort over the complement of their score's bits, integers only. 3.78 ms. While the head moves it reseeds on any real frame short of members or features; at rest, on every 4th or 16th.
 
-**A moving region closes its box, once.** Waiting for a sign of what left failed: as an object set off, 51 of 128 features died in the flow, 7 parted and none was riding, so the box and its picture of the background stayed.
+**A take back keeps the head moving.** A region taken back at speed was then told it had stopped, and new features that all voted stood it still on the background. Now the head keeps its speed, and at speed the new features ride.
 
-**Two tolerances.** Who places the centre: the rigid core, within 1.25 px or three times its spread, whose anchors give way 3 % a frame. Who stays a member: within three frames' motion, up to 12 px at 1920 wide, whose anchors give way up to 12.5 % a frame. One tolerance for both moved the centre 2.5 px on `bigbox`, by letting features straddling the outline vote; 1.25 px for both threw out nearly everything on a real thing moving several pixels a frame.
-
-**A still region holds a frame.** After 15 frames under 0.1 px a frame its members track against that frame rather than the last, starting from where they stood, so no earlier frame's error stays in the answer. A feature the held frame no longer explains goes on from frame to frame; when under half the members are in the frame, a new one is held.
-
-### Known fault: a model that would suit a gimbal (operator's report, 2026-11-03)
-
-The operator sees the region hold still as if the cameras would swing to keep the target centred. They are fixed. So what should move is the window, across the picture, with the target. Nothing in the code steers or recentres; these assumptions, made one at a time for good reasons, add up to it:
-
-| Assumption | Where | What it does on a fixed camera |
-| --- | --- | --- |
-| What is still can be what was selected | every rider graduates in 8 frames while the box is open, `proving` | Everything still in the window becomes a member, so the background is soon the majority |
-| The majority is the region | mode of the claims, `mode_votes` | The background outvotes the thing |
-| A second thing must hold 15 % of the votes, 6 features and one rigid model within 1.25 px | `SECOND_SHARE`, the narrowing fit | A real, non-rigid mover fragments, fails, and its features are thrown out as outliers |
-| The target stays near the window's middle | `q_trial` wants its median within the inner half; votes are weighted to the middle; founders come from the inner half | The assumption a gimbal would make true. A target off the middle of its window cannot wake it |
-| Standing still is the safe answer | zero-motion favours in `framegen.c` (`FG_MID_FAVOUR_ZERO`, `FG_ENOUGH`, AMD's fallback), the held frame | Still features track better than moving ones |
-
-**Proposed, none built.** In the order they would be tried:
-
-| Fix | What changes |
-| --- | --- |
-| A scene that shows it first | A small non-rigid thing (parts moving differently) off the middle of a large window, over a busy background. It must fail today, or the fix has no test. Live: count moving field blocks inside the window, and flag a window standing still over them |
-| Motion outranks stillness | The cameras are fixed, and the attitude kernel checks that they stayed so. A coherent moving group inside the window beats any number of still features, with no share of the votes asked and no rigid fit |
-| Use the background the card already has | `still.c` keeps each camera's still picture, and the AMD field marks what moved. A feature on the background never becomes a member once the window has seen motion, and new members are seeded only on what moves. A target long still has merged into the still picture, so the selection's middle remains the fallback |
-| No test of the window's middle | The inner-half test and the centre weights go, after the selection itself |
-| The window moves by the field | Window = the selected window plus the target's accumulated motion, the median of moving field blocks inside it, which needs no rigid model. Its size stays as drawn unless the target's scale changes |
-| No favouring stillness inside the window | The zero-motion favours and the held frame apply only where no block in the window moves |
+**Known fault: 3D before the head moves.** Until then 3D comes from all the box's features, mostly background, and the filter starts from that ([limitations](limitations.md)).
 
 ### Losing and taking back
 

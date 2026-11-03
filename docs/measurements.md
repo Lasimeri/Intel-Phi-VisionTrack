@@ -623,3 +623,51 @@ The operator reports that the region holds still as though the cameras would swi
 | R | 169.6 s | 5,089 | 131 x 215 | 0.4, 1.2 px | 100 % |
 
 So the windows can travel, and they also stop dead for minutes reading observed with no unobserved or lost result. Whether the target was moving during the long stretches is the operator's observation, not in this log. Live latency with generated frames on is not measured either: `lat_ms` went into the log after this one.
+
+## The virtual gimbal (2026-11-03 11:58 to 12:08, card; scenes 640x480; `logs/check/20261103-115823.txt`, raw `results/runs/`)
+
+The first tracker's median on a software pan and tilt head ([architecture](architecture.md)). **`scripts/check.sh`: 60 passed, 5 failed, 0 skipped. Every real-frame gate passes, and all 5 failures are with generated frames.** The live window runs with them on. The operator's own live tests, before this was committed: "Tracking seems good", with no number.
+
+Runs stamped 10:43 to 10:52 in `results/runs/` are an abandoned tracker that tracked what differs from a fixed background. It passed all 79 gates of its day and failed live at once: box over half the picture on 32.9, 28.5 and 71.8 % of L, R and D's results.
+
+Centre error, median/p95 px, over all frames unless said. Region model: card at 82730dd, `results/runs/20261103-102*`; `offbox`, `jointed`, `offjointed`, `passby` from `20261103-0945*`.
+
+| Scene | Region model | Gimbal, real frames | Gimbal, generated frames on |
+| --- | --- | --- | --- |
+| translate | 0.008/0.015 | 0.006/0.011 | 0.007/0.014 |
+| noise | 0.022/0.036 | 0.037/0.074 | not run |
+| bigbox | 0.223/0.301 | 0.079/0.135 | 0.461/0.754 |
+| smallbox | 0.301/0.693 | 1.001/1.170 | **6.899/9.684, fails** |
+| stillstart | 0.079/0.140 | 0.033/0.113 | 0.102/3.336 |
+| rotate | 0.363/0.680 | 2.585/3.684 | **5.503/6.078, fails** |
+| swing | 0.003/0.006 | 0.008/0.011 | 0.026/0.042 |
+| hold | 0.018/0.030 | 0.000/0.000 | 0.000/0.000 |
+| comeback | 0.146/0.147 | 0.053/0.055 | 0.116/0.119 |
+| offbox | window went 0.000 px of the thing's 211.2 | 1.858/150.013; once moved 1.800/6.767 | 2.021/150.018 |
+| jointed | 27.262/41.352 | 9.413/16.202; once moved 10.073/16.202 | **14.427/26.447, fails** |
+| offjointed | window went 0.001 px of 211.2 | 6.981/159.985; once moved 6.938/9.568 | 6.990/159.985 |
+| passby | window went 0.013 px | 0.000 | 0.000 |
+| dart | not measured at 82730dd | 0.086/1.821, continuity 1.0000, taken back on 58 frames | **92.227/342.627, continuity 0.7431, fails** |
+| dual, 3D | 0.041/0.148; 4.24 mm, 6.58 with generated frames | 0.270/0.473; 14.27 mm | 0.369/0.593; **19.90 mm, limit 15, fails** |
+
+**Why generated frames hurt is not established.** Suspected, not measured: a generated frame moves the features by LK on a picture itself made from flow, and whatever that gets wrong stays in their positions. With the rigid model they helped (`bigbox` 0.223 to 0.084 px); here they hurt on every scene that moves, with `hold` and `passby` unchanged.
+
+**A false alarm on the way.** `scene.sh` printed `replay: DIFFERS` on three of these, because `vt_replay --gate` returns 1 on a missed gate and the script read that as a mismatch. Corrected; run again on the card, `smallbox`, `dart`, `dual`, all with generated frames: `replay: IDENTICAL`, 150, 150 and 300 frames, the gates still missed. The log above keeps the false line.
+
+**3D goes wrong until the head first moves** (host replay of the same build, `out/host/vt_replay NAME 640x480 --frames 150 --csv F`; per-row distance from truth; truth z 4.00 m, background 12 m; region model card runs as above):
+
+| Scene | Gimbal: RMSE, median mm, rows over 100 mm | Region model |
+| --- | --- | --- |
+| bigbox | 1340.9, 0.58, 4 | 1.5, 1.52, 0 |
+| smallbox | 1341.1, 6.27, 4 | 1340.0, 2.01, 4 |
+| stillstart | 5114.0, 0.69, 59 | 0.8, 0.72, 0 |
+| swing | 1159.8, 0.30, 3 | 0.6, 0.57, 0 |
+| rotate | 1341.3, 16.46, 4 | 2.9, 2.26, 0 |
+| comeback | 2977.2, 0.75, 13 | 1.0, 0.92, 0 |
+| translate | 3.4, 0.75, 0 | 0.7, 0.72, 0 |
+| noise | 3.2, 1.23, 0 | 1.8, 1.21, 0 |
+| hold | 2.0, 1.36, 0 | 2.2, 1.36, 0 |
+
+On `bigbox` the measure reads 11.996 m at frames 5 to 8, with the window at rest, and 4.000 m from frame 9, when the head moves. The filter, started at 12 m, rejects 46 measures and reads 11.994 m through frame 53; 4.000 m by frame 56. On `swing`, `rotate`, `offbox` and `dart` it is over 1 m wrong on 47 to 58 of 144 rows. `stillstart`, still for 2 s: measure wrong on 59 rows, filter on 103 of 144.
+
+**Live, no truth** (`logs/live/track-20261103-112631.csv`, about 2.5 min): no box over half the picture on any camera; centre leaps over 100 px: L 0, R 2, D 5; unobserved R 328 of 3,307 rows, D 318 of 1,475, L 0. Measure and filter never differ by over 0.25 m in 1,375 real rows. Pictures on the screen L 59.9, R 60.0, D 30.0 a second, capture to screen mean 65.1, 67.2, 113.3 ms.

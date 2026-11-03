@@ -1,0 +1,11 @@
+ "generated":{"results":149,"center_err_px":{"n":107,"median":102.453,"p95":344.396,"max":346.590},"make_us":{"median":1865.4,"p95":1926.7,"max":2205.0}},
+ "window_travel":{"err_px":{"n":107,"median":92.227,"p95":342.627,"max":346.282},"window_went_px":9.971,"thing_went_px":48.302},
+ "on_the_thing":{"n":104,"center_median":116.179,"center_p95":342.627,"center_max":346.282,"box_area_over_thing_median":5.814,"p95":5.814},
+{"scene":"dart","size":"640x480","mode":"B","results":299,"dropped":0,"wall_s":0.480,"fps":622.8,"cores":0,"tpc":2,"pipelines":1,"pyr_cores":0,"paced":0,"exceptions":0,"last_exception":0,"bad_published":0,"mean_compute_us":{"mvex":628.0,"n_mvex":299,"x87":0.0,"n_x87":0},
+ "states":{"new":1,"observed":107,"unobserved":37,"lost":0,"reacquired":1,"no_features":0,"id_changes":0,"results_with_exceptions":0},
+ "continuity":0.7431,"visible_frames":144,"hidden_frames":0,"hidden_said_observed":0,"avg_features":100.5,"first_reacquired_frame":57,"reacquire_error_px":62.736,
+ "epe_px":{"n":272,"median":0.4403,"p95":8.4543,"max":10.6071},"center_err_px":{"n":107,"median":92.227,"p95":342.627,"max":346.282},
+ "3d":{"meas_rmse_m":8.00719,"meas_z_rmse_m":7.57780,"meas_n":108,"filter_rmse_m":8.48232,"filter_n":126,"vel_rmse_mps":3.78209,"reproj_median_px":0.0075,"metric_frames":142,"rejected":11,"ambiguous":0},
+ "uncertainty":{"nees_mean":414867.243,"nees_in_95pct_band":0.000,"nis_mean":1593.088,"nis_in_95pct_band":0.226,"z_vel_rms":19.462},
+ "latency_us":{"median":40466.8,"p95":53082.5,"p99":58959.6,"max":59064.0},
+ "stage_us_median":{"dma_in":170.5,"queue":24591.0,"pyramid":320.5,"lk":244.8,"region":97.0,"stereo":139.7,"estimate":20.6,"track":536.3},"track_us_p99":2046.7,"pyramid_us_p99":364.9}

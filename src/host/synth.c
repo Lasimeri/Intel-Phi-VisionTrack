@@ -6,7 +6,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-static const char *const names[SC_COUNT] = {"translate", "shapes", "camera", "brightness", "noise", "occlusion", "loss", "leave", "helix", "linear3d", "repeat", "flat", "glitch", "bigbox", "hold", "smallbox", "stillstart", "rotate", "swing", "comeback", "offbox", "jointed", "offjointed", "passby", "dual"};
+static const char *const names[SC_COUNT] = {"translate", "shapes", "camera", "brightness", "noise", "occlusion", "loss", "leave", "helix", "linear3d", "repeat", "flat", "glitch", "bigbox", "hold", "smallbox", "stillstart", "rotate", "swing", "comeback", "offbox", "jointed", "offjointed", "passby", "dart", "dual"};
 
 const char *scene_name(enum scene_id id) { return names[id]; }
 
@@ -34,7 +34,7 @@ void scene_setup(struct scene *s, enum scene_id id, int w, int h, int nframes, d
     s->stereo = 1;
     s->select_frame = 5;
     s->samples = w > 1400 ? 2 : 3;
-    s->shutter = id == SC_JOINTED || id == SC_OFFJOINTED ? 0.5 : 0.0;
+    s->shutter = id == SC_JOINTED || id == SC_OFFJOINTED || id == SC_DART ? 0.5 : 0.0;
     if (id == SC_DUAL) {
         /* Camera 1 stands at C = (1.2, 0.1, 0.2) m, turned by 17.5 degrees about y toward the scene, with 70 % of the focal length. */
         const double th = 17.5 * M_PI / 180.0, ct = cos(th), st = sin(th);
@@ -97,7 +97,7 @@ static inline void unturn(const struct motion *m, double *lx, double *ly)
 }
 
 /* The background as busy as the object, so that features on it are as good as features on the object. */
-static inline int busy_background(const struct scene *s) { return s->id == SC_BIGBOX || s->id == SC_SMALLBOX || s->id == SC_STILLSTART || s->id == SC_ROTATE || s->id == SC_SWING || s->id == SC_COMEBACK || s->id == SC_OFFBOX || s->id == SC_JOINTED || s->id == SC_OFFJOINTED || s->id == SC_PASSBY; }
+static inline int busy_background(const struct scene *s) { return s->id == SC_BIGBOX || s->id == SC_SMALLBOX || s->id == SC_STILLSTART || s->id == SC_ROTATE || s->id == SC_SWING || s->id == SC_COMEBACK || s->id == SC_OFFBOX || s->id == SC_JOINTED || s->id == SC_OFFJOINTED || s->id == SC_PASSBY || s->id == SC_DART; }
 
 static void motion_at(const struct scene *s, double t, struct motion *m)
 {
@@ -199,6 +199,13 @@ static void motion_at(const struct scene *s, double t, struct motion *m)
         m->Y = 0.06 * sin(1.3 * t);
         m->Vx = (walk(t + 0.001, 0.6) - walk(t - 0.001, 0.6)) / 0.002;
         m->Vy = 0.078 * cos(1.3 * t);
+        m->noise = 2.0;
+        break;
+    case SC_DART:
+        m->halfx = 0.25;
+        m->halfy = 0.2;
+        m->X = 1.3 * sin(4.0 * t);
+        m->Vx = 5.2 * cos(4.0 * t);
         m->noise = 2.0;
         break;
     case SC_PASSBY:

@@ -31,6 +31,7 @@ enum scene_id {
     SC_JOINTED,     /* a thing of six parts, each with a motion and a turn of its own over a common walk, blurred by the shutter: nothing rigid about it; in the middle of its box */
     SC_OFFJOINTED,  /* the same thing off the middle of a large box: what a real drag holds */
     SC_PASSBY,      /* a still thing selected; another crosses the box without touching it: the window has no business leaving */
+    SC_DART,        /* to and fro at up to 28 pixels a frame, blurred by a half-frame shutter: what optical flow loses */
     SC_DUAL,        /* a second camera off to the side, turned 17.5 degrees, a different focal length, its shutter 11 ms late: the rig of two cameras that were never a stereo pair */
     SC_COUNT,
 };

@@ -4,9 +4,9 @@ What `vt_run --gate` holds each scene to (`score_gate` in `src/host/score.c`). T
 
 Every scene, always: a hidden region never reads as observed, and the track id does not change.
 
-`check.sh` also runs eleven of them with `--framegen`, to the same tolerances on the real frames, card against host on every result, and `vt_ncc_check`: nearly blank windows must never match in the appearance search, which no scene could show (an exactly flat patch has zero variance and was already refused).
+`check.sh` also runs sixteen of them with `--framegen`, to the same tolerances on the real frames, card against host on every result (**five fail today: `smallbox`, `rotate`, `jointed`, `dart`, `dual`**, [limitations](../docs/limitations.md)), and `vt_ncc_check`: nearly blank windows must never match in the appearance search, which no scene could show (an exactly flat patch has zero variance and was already refused).
 
-**What these do not cover.** Every moving thing here is rigid, without motion blur or change of light, and most of what its box's middle holds. All of them pass while a real selected target can still be left behind by a window that stands still ([limitations](../docs/limitations.md)). A scene with a small non-rigid mover off the middle of a large window does not exist yet, and is the first step of fixing that.
+**What these do not cover.** Blur and parts moving differently are here (`jointed`, `offjointed`, `dart`), real change of shape and light on a thing are not. Scenes passing does not prove the live window: a tracker passed all 79 gates of its day and failed at once on real targets. **The box scenes have no 3D limit, and 3D on them is known to be wrong before the head moves** ([limitations](../docs/limitations.md)).
 
 | Scene | What it provokes | Continuity | EPE median | Centre median | 3D RMSE | Other |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -30,10 +30,11 @@ Every scene, always: a hidden region never reads as observed, and the track id d
 | swing | as bigbox, swinging to and fro, up to 19 px a frame | >= 0.95 | | <= 4 px | | centre p95 <= 12 px |
 | hold | a still object under noise of sigma 4: any travel of the region is error | >= 0.99 | | <= 0.5 px | | centre p95 <= 1 px |
 | comeback | as bigbox, out of the picture to one side for 3 s, past any patience, and back from the other: `--frames 240` | | | <= 4 px | | runs out of patience, is taken back, within 3 px; never reads observed while away |
-| offbox | **fails today, on purpose not yet a gate:** rigid, wholly outside the middle half of a box 5 times its size. Window went 0.000 px, thing 211.2 px, continuity 1.0000 | | | | | window travel median <= 4 px, p95 <= 12 px |
-| jointed | **fails today:** six parts with their own motions, turns and shutter blur, in the middle of its box: window travel median 27.262 px | | | | | as offbox |
-| offjointed | **fails today:** the same off the middle: window went 0.001 px, thing 211.2 px | | | | | as offbox |
-| passby | a still thing selected, another crosses the box without touching it: the window must not leave. Holds today, 0.013 px | | | | | window travel max <= 3 px |
+| offbox | rigid, wholly outside the middle half of a box 5 times its size. The rigid model's window went 0.000 px where the thing went 211.2 px | >= 0.95 | | | | once it has moved: centre median <= 5 px, p95 <= 12 px; box <= 1.6 times the thing |
+| jointed | six parts with their own motions, turns and shutter blur, in the middle of its box. The rigid model: 27.9 px | >= 0.95 | | | | once it has moved: centre median <= 12 px, p95 <= 20 px, set from the measured 10.07, 16.20 px; box <= 1.6 times the thing |
+| offjointed | the same off the middle. The rigid model's window went 0.001 px | >= 0.95 | | | | as jointed |
+| dart | rigid, to and fro, up to 28 px a frame with half a frame of blur, box 2.4 times the thing | >= 0.95 | | | | as offbox |
+| passby | a still thing selected, another crosses the box without touching it: the window must not leave | >= 0.95 | | | | window travel max <= 3 px |
 | dual | two independently tracked views, rotated, focal lengths differ, shutter 11 ms apart; TRUE calibration given (`scene.sh dual 640x480 --dual --gate`) | see `score_gate` | | | <= 15 mm | proves the fusion mechanism, not any calibration. Set from the measured 11.20 mm at 4 m with little parallax: the first limit, 10 mm, was written before the scene had ever run and failed it |
 
 The depth map has no scene here, by the user's direction: it runs on the real room, which has no per-pixel truth. Its checks are in [measurements.md](../docs/measurements.md): card against host hash over real frames (a gate in `check.sh`, where those frames exist), a deliberately rotated pose must lose, the sweep's depth against depths triangulated from landmarks (`vt_mapcheck`), and physical sizes.

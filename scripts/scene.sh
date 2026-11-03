@@ -35,7 +35,7 @@ rcard=0
 out/host/vt_run "$name" "$size" --hash "$hc" --csv "$out.csv" --json "$out.json" "$@" || rcard=$?
 if ((compare == 0)); then
     echo "replay: nothing to compare with for these options"
-elif out/host/vt_replay "$name" "$size" "$@" >"$hh" && { ((generated)) && (($(wc -l <"$hc") >= frames)) || [[ $(wc -l <"$hc") == "$frames" ]]; } && [[ $(wc -l <"$hh") == $(wc -l <"$hc") ]] && cmp -s "$hc" "$hh"; then
+elif { rreplay=0; out/host/vt_replay "$name" "$size" "$@" >"$hh" || rreplay=$?; ((rreplay <= 1)); } && { ((generated)) && (($(wc -l <"$hc") >= frames)) || [[ $(wc -l <"$hc") == "$frames" ]]; } && [[ $(wc -l <"$hh") == $(wc -l <"$hc") ]] && cmp -s "$hc" "$hh"; then
     echo "replay: IDENTICAL, $frames frames, card MVEX = host one-thread lane model"
 else
     echo "replay: DIFFERS"

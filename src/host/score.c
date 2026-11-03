@@ -38,7 +38,7 @@ static double rms(double sum2, int n) { return n ? sqrt(sum2 / n) : 0.0; }
 struct score {
     const struct dataset *ds;
     FILE *csv;
-    struct stat_set epe, center, center_gen, gen_us, travel, lat, reproj, nees, nis, st[VT_T_COUNT];
+    struct stat_set epe, center, center_gen, gen_us, travel, moved_center, pad, lat, reproj, nees, nis, st[VT_T_COUNT];
     double sel_x, sel_y, sel_u, sel_v, went_win, went_thing;
     int sel_set;
     double prev_s;
@@ -144,6 +144,11 @@ void score_frame(struct score *s, const struct vt_result *o, double lat_us, doub
         stat_add(&s->travel, terr);
         s->went_win = hypot(wu, wv);
         s->went_thing = hypot(tu, tv);
+        /* Once the thing has shown itself by moving: how far the region's point is from it, and how much bigger its box is than the thing. */
+        if (hypot(tu, tv) >= 8.0) {
+            stat_add(&s->moved_center, hypot((double)o->cx - t.u, (double)o->cy - t.v));
+            stat_add(&s->pad, (double)o->w * (double)o->h / (4.0 * t.half_w * t.half_h));
+        }
     }
     double cerr = 0.0;
     if (measured && t.on_screen && t.visible >= 0.5) {
@@ -231,8 +236,10 @@ void score_print(struct score *s, FILE *f, const char *mode, int results, int dr
     stat_sort(&s->center_gen);
     stat_sort(&s->gen_us);
     stat_sort(&s->travel);
+    stat_sort(&s->moved_center);
+    stat_sort(&s->pad);
     fprintf(f, " \"generated\":{\"results\":%d,\"center_err_px\":{\"n\":%d,\"median\":%.3f,\"p95\":%.3f,\"max\":%.3f},\"make_us\":{\"median\":%.1f,\"p95\":%.1f,\"max\":%.1f}},\n", s->n_generated, s->center_gen.n, pct(&s->center_gen, .5), pct(&s->center_gen, .95), top(&s->center_gen), pct(&s->gen_us, .5), pct(&s->gen_us, .95), top(&s->gen_us));
-    fprintf(f, " \"window_travel\":{\"err_px\":{\"n\":%d,\"median\":%.3f,\"p95\":%.3f,\"max\":%.3f},\"window_went_px\":%.3f,\"thing_went_px\":%.3f},\n", s->travel.n, pct(&s->travel, .5), pct(&s->travel, .95), top(&s->travel), s->went_win, s->went_thing);
+    fprintf(f, " \"window_travel\":{\"err_px\":{\"n\":%d,\"median\":%.3f,\"p95\":%.3f,\"max\":%.3f},\"window_went_px\":%.3f,\"thing_went_px\":%.3f},\n \"on_the_thing\":{\"n\":%d,\"center_median\":%.3f,\"center_p95\":%.3f,\"center_max\":%.3f,\"box_area_over_thing_median\":%.3f,\"p95\":%.3f},\n", s->travel.n, pct(&s->travel, .5), pct(&s->travel, .95), top(&s->travel), s->went_win, s->went_thing, s->moved_center.n, pct(&s->moved_center, .5), pct(&s->moved_center, .95), top(&s->moved_center), pct(&s->pad, .5), pct(&s->pad, .95));
     stat_sort(&s->lat);
     stat_sort(&s->reproj);
     stat_sort(&s->nees);
@@ -295,12 +302,16 @@ int score_gate(struct score *s, FILE *f)
         NEED(center <= 4.0, "centre median <= 4 px: the region follows the object, not the background");
         NEED(pct(&s->center, .95) <= 12.0, "centre p95 <= 12 px");
         break;
+    case SC_DART:
     case SC_OFFBOX:
     case SC_JOINTED:
     case SC_OFFJOINTED:
         NEED(cont >= 0.95, "continuity >= 0.95");
-        NEED(pct(&s->travel, .5) <= 4.0, "window travel median <= 4 px: it goes where the thing goes");
-        NEED(pct(&s->travel, .95) <= 12.0, "window travel p95 <= 12 px");
+        NEED(s->moved_center.n > 0, "the thing moved");
+        /* A thing of parts has no one point: its parts wander by up to 11 px about the middle that is scored. Set from the measured 10.1, 16.2 px, against the region model's 27.9, 41.4 px on the same scene. */
+        NEED(pct(&s->moved_center, .5) <= (s->ds->s.id == SC_JOINTED || s->ds->s.id == SC_OFFJOINTED ? 12.0 : 5.0), "once it has moved, the region is on it");
+        NEED(pct(&s->moved_center, .95) <= (s->ds->s.id == SC_JOINTED || s->ds->s.id == SC_OFFJOINTED ? 20.0 : 12.0), "its p95");
+        NEED(pct(&s->pad, .5) <= 1.6, "and its box hugs it: area median <= 1.6 times the thing's");
         break;
     case SC_PASSBY:
         NEED(cont >= 0.95, "continuity >= 0.95");
