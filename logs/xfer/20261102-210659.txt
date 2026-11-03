@@ -1,0 +1,19 @@
+date   2026-11-02 21:06:59 CST
+tree   /media/1TB-NVMe/Intel-Phi-VisionTrack (git no commits)
+stack  /media/1TB-NVMe/Xeon-Phi/Intel Phi 7120A (git aeb1d1c)
+cc     clang version 23.1.1 (https://github.com/llvm/llvm-project.git 6dfe1677ab8dffbc6ec13d53a1e0215d75147689)
+phictl put: 100304 bytes
+vtrackd started on the card: nr_hugepages 64 (was 0)
+vtrackd: start (card)
+vtrackd: DMA channel 5, region at card address 0x8100000000, 4096 MiB (card)
+vtrackd: 244 cpus, 61 cores, 59 usable (card)
+host: PCIe link 5.0 GT/s PCIe x8 of x16
+host: done
+vt_xfer rc 0
+vtrackd: start (card)
+vtrackd: DMA channel 5, region at card address 0x8100000000, 4096 MiB (card)
+vtrackd: 244 cpus, 61 cores, 59 usable (card)
+vtrackd: session 1 kind 1 (card)
+vtrackd: session 1 ended rc 0 (card)
+host: vtrackd asked to quit
+card: nr_hugepages back to 0

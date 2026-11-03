@@ -1,0 +1,44 @@
+date   2026-11-02 20:52:11 CST
+tree   /media/1TB-NVMe/Intel-Phi-VisionTrack (git no commits)
+stack  /media/1TB-NVMe/Xeon-Phi/Intel Phi 7120A (git aeb1d1c)
+cc     clang version 23.1.1 (https://github.com/llvm/llvm-project.git 6dfe1677ab8dffbc6ec13d53a1e0215d75147689)
+phictl put: 91488 bytes
+topology  cpus 244 cores 61 usable 59 (card)
+reserved  core_id 60 cpus 0 241 242 243 why cpu0 
+reserved  core_id 59 cpus 237 238 239 240 why block-poller
+threads_per_core  1:0 2:0 3:0 4:61
+pollers  2 on cpus 239 238
+other_busy_cpus  0 (over 200 ms, before the run)
+vxop load+store   4e8dc9044328c432
+vxop bcast        c0fd2ecc85efc245
+vxop loadu        e19a17a4972b7db3
+vxop load_u8      d13d88857725ada9
+vxop add          bcf21794b1bc8649
+vxop sub          81a15b2c3688d751
+vxop mul          571fe652cb33732b
+vxop fma          10ed05f0f75c11b9
+vxop fnma         6280ae1a700a9044
+vxop fma_s+mul_s  ed738d1bd648cb1f
+vxop minmax       e085503f6fcdcfe5
+vxop abs          85635933ccfdf9b2
+vxop alignr       3bb3a188d29961b8
+vxop perm         b5e8fb1741d9c2d2
+vxop blend+cmp    cac713b6bab5d8a4
+vxop round_near   93a40909585dbb27
+vxop round_down   4c180a29256651af
+vxop hsum         d9ae0252d8cc977c
+subnormal 11169934e8c8e225 first_bits 8001c732
+fma_hash c029f0744630596c (MVEX)
+scalar_vs_mvex  0 of 4096 lanes differ, max 0 ulp (card, x87 double rounding)
+tsc_hz  1238089556 (against the card's CLOCK_MONOTONIC)
+one_thread_mvex_L1    0.993 cycles/elem median of 9, min 0.990 max 1.001 (cpu 1)
+one_thread_scalar_L1  14.272 cycles/elem median of 9, min 14.223 max 14.432 (cpu 1)
+one_thread_speedup_L1 14.37 x (MVEX over x87 scalar, same thread)
+one_thread_mvex_L2    3.617 cycles/elem median of 9, min 3.613 max 3.620 (cpu 1)
+one_thread_scalar_L2  16.841 cycles/elem median of 9, min 16.791 max 17.061 (cpu 1)
+one_thread_speedup_L2 4.66 x (MVEX over x87 scalar, same thread)
+team_pinned  118 of 118 threads on their assigned cpu
+team_fma  21.0 Gelem/s = 42.0 GFLOP/s measured, median of 9, threads 118 (peak bound 16 lanes x 2 flops x 59 cores x 1.238 GHz = 2338 GFLOP/s, not a prediction)
+team_round_empty  11502 cycles = 9.29 us median of 9x2000, threads 118 cores 59 tpc 2
+m0_card_done
+rc 0

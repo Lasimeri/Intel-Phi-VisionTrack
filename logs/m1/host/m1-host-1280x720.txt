@@ -1,0 +1,8 @@
+kern u8_to_q6     1280x720 fa2695a7c4807a66
+kern norm         1280x720 f04b8a5f5a615d05
+kern minmax       1280x720 0.0 14848.0
+kern gauss5       1280x720 ab81906b9fc679ec
+kern reduce       1280x720 698d506eca3e80e9
+kern sobel_x      1280x720 37cf8968cbb4ae65
+kern sobel_y      1280x720 a798338ac840c654
+kern absdiff      1280x720 8606277ed80fffb5

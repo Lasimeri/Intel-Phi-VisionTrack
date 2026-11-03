@@ -1,0 +1,7 @@
+{"scene":"translate","size":"640x480","mode":"B","variant":0,"cores":0,"tpc":2,"frames":150,"results":150,"dropped":0,"paced":0,"wall_s":0.129,"pub_s":0.118,"fps":1165.9,
+ "states":{"new":1,"observed":144,"unobserved":0,"lost":0,"reacquired":0,"no_features":0,"id_changes":0},
+ "continuity":1.0000,"hidden_frames":0,"hidden_said_observed":0,"avg_features":89.0,
+ "epe_px":{"n":12816,"median":0.0093,"p95":0.0185,"max":0.0331},"center_err_px":{"n":144,"median":0.005,"p95":0.009,"max":0.012},
+ "3d":{"meas_rmse_m":0.00075,"meas_n":145,"filter_rmse_m":0.00027,"filter_n":129,"vel_rmse_mps":0.00354,"reproj_median_px":0.0014,"metric_frames":145,"rejected":0,"ambiguous":0,"mean_nis":0.005,"z_pos_rms":0.023,"z_vel_rms":0.016},
+ "latency_us":{"median":9974.0,"p95":10219.4,"p99":11461.1,"max":12139.6},
+ "stage_us_median":{"dma_in":170.5,"queue":5729.2,"pyramid":296.6,"lk":246.1,"region":95.4,"stereo":142.1,"estimate":20.9,"all":842.1},"all_us_p99":994.1}

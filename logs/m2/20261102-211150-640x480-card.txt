@@ -1,0 +1,33 @@
+date   2026-11-02 21:11:50 CST
+tree   /media/1TB-NVMe/Intel-Phi-VisionTrack (git no commits)
+stack  /media/1TB-NVMe/Xeon-Phi/Intel Phi 7120A (git aeb1d1c)
+cc     clang version 23.1.1 (https://github.com/llvm/llvm-project.git 6dfe1677ab8dffbc6ec13d53a1e0215d75147689)
+topology  cpus 244 cores 61 usable 59; other_busy_cpus 0 (card)
+points 330 patch 21x21 levels 4 frame 640x480
+lk_hash 0,0 eade32893386515c
+case d=(0.00, 0.00)  ok 330 of 330  EPE px median 0.0000 p95 0.0000 max 0.0000  mvex-vs-x87 px mean 0.000000 max 0.000000 (card)
+lk_hash 1,0 44ae88b622d308ce
+case d=(0.25, 0.00)  ok 330 of 330  EPE px median 0.0073 p95 0.0138 max 0.0264  mvex-vs-x87 px mean 0.000000 max 0.000008 (card)
+lk_hash 0,1 0802c5de54039f81
+case d=(0.00, 0.25)  ok 330 of 330  EPE px median 0.0067 p95 0.0137 max 0.0254  mvex-vs-x87 px mean 0.000000 max 0.000000 (card)
+lk_hash 2,2 7116831ba0ca5040
+case d=(0.50, 0.50)  ok 330 of 330  EPE px median 0.0069 p95 0.0162 max 0.0289  mvex-vs-x87 px mean 0.000000 max 0.000008 (card)
+lk_hash -3,1 7bf3db86b646f885
+case d=(-0.75, 0.25)  ok 330 of 330  EPE px median 0.0111 p95 0.0203 max 0.0417  mvex-vs-x87 px mean 0.000000 max 0.000031 (card)
+lk_hash 5,-6 e5109bcd7b5acf01
+case d=(1.25, -1.50)  ok 330 of 330  EPE px median 0.0090 p95 0.0181 max 0.0316  mvex-vs-x87 px mean 0.000000 max 0.000000 (card)
+lk_hash 13,7 da91dec1e7b0d2ee
+case d=(3.25, 1.75)  ok 330 of 330  EPE px median 0.0115 p95 0.0209 max 0.0285  mvex-vs-x87 px mean 0.000000 max 0.000015 (card)
+lk_hash -22,17 23bdc5f16faacca6
+case d=(-5.50, 4.25)  ok 330 of 330  EPE px median 0.0088 p95 0.0184 max 0.0339  mvex-vs-x87 px mean 0.000000 max 0.000031 (card)
+lk_hash 49,-30 2cc8c0fa70f2ea91
+case d=(12.25, -7.50)  ok 330 of 330  EPE px median 0.0089 p95 0.0181 max 0.0314  mvex-vs-x87 px mean 0.000000 max 0.000031 (card)
+lk_hash -101,66 88da80bd2a82103d
+case d=(-25.25, 16.50)  ok 303 of 330  EPE px median 0.0171 p95 45.2494 max 61.6750  mvex-vs-x87 px mean 0.000005 max 0.000785 (card)
+csv,variant,threads,tpc,points,iters_per_point,us_per_point,points_per_s
+csv,mvex,1,1,330,26.2,97.15,10293
+csv,x87,1,1,330,26.2,974.98,1026
+one_thread_speedup 10.04 x (card, LK whole, MVEX over x87; the 2x2 solves stay x87 in both)
+csv,mvex,59,1,330,26.2,2.846,351316
+team_hash threads 59 88da80bd2a82103d
+rc 2

@@ -1,0 +1,44 @@
+# Built programs and whatever a run leaves behind, saved depth maps and point clouds among it (out/run/map.*).
+out/
+compile_commands.json
+.cache/
+
+# Never published: these describe a private room. What the cameras saw, the landmarks read from it, poses, the
+# cameras' serial numbers, live logs of where things moved. input/calib/README.md says what belongs here.
+input/calib/*
+!input/calib/README.md
+logs/live/
+input/refs/*/
+
+# A backstop, wherever they turn up: pictures, video, depth maps, point clouds, meshes.
+*.pgm
+*.ppm
+*.pnm
+*.pfm
+*.png
+*.jpg
+*.jpeg
+*.bmp
+*.gif
+*.tif
+*.tiff
+*.webp
+*.exr
+*.mjpeg
+*.mjpg
+*.mp4
+*.mkv
+*.avi
+*.mov
+*.yuv
+*.raw
+*.bin
+*.npy
+*.ply
+*.pcd
+*.xyz
+*.las
+*.obj
+*.stl
+*.glb
+*.gltf

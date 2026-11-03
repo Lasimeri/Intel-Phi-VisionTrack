@@ -1,0 +1,60 @@
+date   2026-11-02 21:15:09 CST
+tree   /media/1TB-NVMe/Intel-Phi-VisionTrack (git no commits)
+stack  /media/1TB-NVMe/Xeon-Phi/Intel Phi 7120A (git aeb1d1c)
+cc     clang version 23.1.1 (https://github.com/llvm/llvm-project.git 6dfe1677ab8dffbc6ec13d53a1e0215d75147689)
+topology  cpus 244 cores 61 usable 59; other_busy_cpus 0 (card)
+points 330 patch 21x21 levels 4 frame 640x480
+lk_first 0,0 x 42740000 y 42740000 eig 42033b99 res 00000000 cxx 00000000 cxy 00000000 cyy 00000000 it 3 st 0
+lk_hash 0,0 eade32893386515c
+case d=(0.00, 0.00)  ok 330 of 330  EPE px median 0.0000 p95 0.0000 max 0.0000  mvex-vs-x87 px mean 0.000000 max 0.000000 (card)
+lk_first 1,0 x 42750c0b y 427402e7 eig 42033b99 res 3ed3c6f8 cxx 37994668 cxy 34c7e91b cyy 3781f0b0 it 7 st 0
+lk_hash 1,0 c2fc02a91828e828
+case d=(0.25, 0.00)  ok 330 of 330  EPE px median 0.0073 p95 0.0138 max 0.0264  mvex-vs-x87 px mean 0.000000 max 0.000008 (card)
+lk_first 0,1 x 4274098a y 42750b37 eig 42033b99 res 3ed95caa cxx 37a240cf cxy 34d39ed1 cyy 37898d2d it 7 st 0
+lk_hash 0,1 b1340a6a37e982d8
+case d=(0.00, 0.25)  ok 330 of 330  EPE px median 0.0067 p95 0.0137 max 0.0254  mvex-vs-x87 px mean 0.000000 max 0.000000 (card)
+lk_first 2,2 x 42760651 y 427601b6 eig 42033b99 res 3f187d5b cxx 38415ace cxy 357c2f56 cyy 3823eb07 it 8 st 0
+lk_hash 2,2 520cffd6f0949bf6
+case d=(0.50, 0.50)  ok 330 of 330  EPE px median 0.0069 p95 0.0162 max 0.0289  mvex-vs-x87 px mean 0.000000 max 0.000008 (card)
+lk_first -3,1 x 427114c6 y 42750c1c eig 42033b99 res 3f071781 cxx 38079839 cxy 3530d9c8 cyy 37e5e727 it 9 st 0
+lk_hash -3,1 26e9ac69783d4e32
+case d=(-0.75, 0.25)  ok 330 of 330  EPE px median 0.0111 p95 0.0203 max 0.0417  mvex-vs-x87 px mean 0.000000 max 0.000031 (card)
+lk_first 5,-6 x 4279140c y 426e02f0 eig 42033b99 res 3f113bac cxx 3824305a cxy 35562523 cyy 380b3147 it 12 st 0
+lk_hash 5,-6 640e36fa21156f51
+case d=(1.25, -1.50)  ok 330 of 330  EPE px median 0.0090 p95 0.0181 max 0.0316  mvex-vs-x87 px mean 0.000000 max 0.000000 (card)
+lk_first 13,7 x 4280852d y 427afc3f eig 42033b99 res 3f0627d6 cxx 381342a0 cxy 354010d5 cyy 37f9aea7 it 11 st 0
+lk_hash 13,7 18860dc859395609
+case d=(3.25, 1.75)  ok 330 of 330  EPE px median 0.0115 p95 0.0209 max 0.0285  mvex-vs-x87 px mean 0.000000 max 0.000015 (card)
+lk_first -22,17 x 425e0adc y 4282865d eig 42033b99 res 3f0ae317 cxx 381b5709 cxy 354a9a93 cyy 3803b0d6 it 11 st 0
+lk_hash -22,17 ee913e81a48600f2
+case d=(-5.50, 4.25)  ok 330 of 330  EPE px median 0.0088 p95 0.0184 max 0.0339  mvex-vs-x87 px mean 0.000000 max 0.000031 (card)
+lk_first 49,-30 x 429289fb y 425602eb eig 42033b99 res 3f11392c cxx 38242c06 cxy 35561f7f cyy 380b2d9c it 11 st 0
+lk_hash 49,-30 ed54d281c126bff5
+case d=(12.25, -7.50)  ok 330 of 330  EPE px median 0.0089 p95 0.0181 max 0.0314  mvex-vs-x87 px mean 0.000000 max 0.000031 (card)
+lk_first -101,66 x 4286399f y 428dc67f eig 42033b99 res 42089879 cxx 3e026b88 cxy 3b2a1a0a cyy 3ddd211f it 30 st 0
+lk_hash -101,66 370a347e518a7914
+case d=(-25.25, 16.50)  ok 303 of 330  EPE px median 0.0171 p95 45.2494 max 61.6750  mvex-vs-x87 px mean 0.000005 max 0.000785 (card)
+flowback d=(-25.25, 16.50): said OK 303, of them wrong by over 1 px 137; with the check said OK 171, wrong 5 (card)
+patch_prefetch_ab us/point with 71.31 [71.11 91.09] without 82.05 [81.76 82.60] (card, one thread, median of 7, interleaved)
+csv,variant,threads,tpc,points,iters_per_point,us_per_point,points_per_s
+csv,mvex,1,1,330,15.8,81.94,12204
+csv,x87,1,1,330,15.8,743.57,1345
+one_thread_speedup 9.07 x (card, LK whole, MVEX over x87; the 2x2 solves stay x87 in both)
+csv,mvex_pf0,59,1,330,15.8,2.479,403344
+team_hash threads 59 ed54d281c126bff5
+csv,mvex_pf0,118,2,330,15.8,1.477,677247
+team_hash threads 118 ed54d281c126bff5
+csv,mvex_pf0,177,3,330,15.8,1.139,877994
+team_hash threads 177 ed54d281c126bff5
+csv,mvex_pf0,236,4,330,15.8,1.313,761806
+team_hash threads 236 ed54d281c126bff5
+csv,mvex_pf1,59,1,330,15.8,1.653,604812
+team_hash threads 59 ed54d281c126bff5
+csv,mvex_pf1,118,2,330,15.8,1.211,825795
+team_hash threads 118 ed54d281c126bff5
+csv,mvex_pf1,177,3,330,15.8,1.184,844368
+team_hash threads 177 ed54d281c126bff5
+csv,mvex_pf1,236,4,330,15.8,1.282,780012
+team_hash threads 236 ed54d281c126bff5
+m2_card_done ok
+rc 0

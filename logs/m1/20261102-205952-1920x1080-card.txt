@@ -1,0 +1,87 @@
+date   2026-11-02 21:00:06 CST
+tree   /media/1TB-NVMe/Intel-Phi-VisionTrack (git no commits)
+stack  /media/1TB-NVMe/Xeon-Phi/Intel Phi 7120A (git aeb1d1c)
+cc     clang version 23.1.1 (https://github.com/llvm/llvm-project.git 6dfe1677ab8dffbc6ec13d53a1e0215d75147689)
+topology  cpus 244 cores 61 usable 59; other_busy_cpus 0 (card)
+kern u8_to_q6     1920x1080 036344bb6bd4f680
+kern norm         1920x1080 2d3d9d48b2d2f053
+kern minmax       1920x1080 0.0 15232.0
+kern gauss5       1920x1080 645b084904add77e
+kern reduce       1920x1080 addee9ee27dc2577
+kern reduce_plain 1920x1080 addee9ee27dc2577
+kern sobel_x      1920x1080 5b37150ee2f829dd
+kern sobel_y      1920x1080 4cb83638a2449731
+kern absdiff      1920x1080 04466e59e02baf05
+correctness identical (card, 1920x1080, x87 vs MVEX, hash per kernel)
+csv,kernel,w,h,threads,tpc,variant,median_us,min_us,max_us,mpix_s
+csv,u8_to_q6,1920,1080,1,1,mvex,2615.7,2599.8,2669.2,792.7
+csv,u8_to_q6,1920,1080,1,1,scalar,33423.9,33358.8,33505.7,62.0
+csv,norm,1920,1080,1,1,mvex,7373.6,7320.9,7664.0,281.2
+csv,norm,1920,1080,1,1,scalar,348358.1,348105.8,354905.9,6.0
+csv,gauss5,1920,1080,1,1,mvex,16267.4,16147.2,21767.9,127.5
+csv,gauss5,1920,1080,1,1,scalar,394508.6,394351.6,421894.0,5.3
+csv,reduce,1920,1080,1,1,mvex,7213.6,7186.1,7309.3,71.9
+csv,reduce,1920,1080,1,1,scalar,180891.5,180712.1,198759.7,2.9
+csv,sobel,1920,1080,1,1,mvex,10104.8,10007.1,13036.7,205.2
+csv,sobel,1920,1080,1,1,scalar,532734.2,529810.3,536594.9,3.9
+csv,absdiff,1920,1080,1,1,mvex,9367.7,9338.1,9384.6,221.4
+csv,absdiff,1920,1080,1,1,scalar,67637.8,67523.6,67678.9,30.7
+csv,reduce,1920,1080,1,1,mvex_fused_pf,7258.0,7205.8,8014.2,71.4
+csv,reduce,1920,1080,1,1,mvex_fused_nopf,8752.0,8706.5,12671.2,59.2
+csv,reduce,1920,1080,1,1,mvex_plain_pf,7228.4,7211.9,7362.8,71.7
+csv,reduce,1920,1080,1,1,mvex_plain_nopf,8985.2,8919.8,9481.5,57.7
+csv,u8_to_q6,1920,1080,59,1,mvex,49.0,46.6,1144.5,42280.7
+csv,norm,1920,1080,59,1,mvex,110.0,109.6,147.6,18858.0
+csv,gauss5,1920,1080,59,1,mvex,267.2,264.4,320.3,7759.4
+csv,reduce,1920,1080,59,1,mvex,96.7,96.3,152.0,5359.7
+csv,sobel,1920,1080,59,1,mvex,173.4,167.4,236.9,11957.1
+csv,absdiff,1920,1080,59,1,mvex,137.3,133.1,217.5,15100.8
+csv,reduce,1920,1080,59,1,mvex_fused_nopf,131.3,130.9,164.3,3948.3
+csv,reduce,1920,1080,59,1,mvex_plain_pf,103.0,102.7,124.4,5032.2
+csv,reduce,1920,1080,59,1,mvex_plain_nopf,134.9,134.6,157.4,3842.5
+csv,u8_to_q6,1920,1080,118,2,mvex,35.8,34.2,758.9,57954.9
+csv,norm,1920,1080,118,2,mvex,74.6,74.0,104.7,27792.3
+csv,gauss5,1920,1080,118,2,mvex,194.4,193.8,234.3,10665.7
+csv,reduce,1920,1080,118,2,mvex,65.5,65.3,122.3,7913.6
+csv,sobel,1920,1080,118,2,mvex,142.2,139.5,197.4,14577.7
+csv,absdiff,1920,1080,118,2,mvex,82.5,79.9,181.2,25119.5
+csv,reduce,1920,1080,118,2,mvex_fused_nopf,89.0,87.6,119.4,5825.3
+csv,reduce,1920,1080,118,2,mvex_plain_pf,69.8,68.8,88.4,7431.0
+csv,reduce,1920,1080,118,2,mvex_plain_nopf,90.9,90.4,119.6,5703.6
+csv,u8_to_q6,1920,1080,177,3,mvex,34.1,33.1,413.5,60817.4
+csv,norm,1920,1080,177,3,mvex,62.2,61.7,101.3,33331.4
+csv,gauss5,1920,1080,177,3,mvex,148.8,148.4,198.5,13937.9
+csv,reduce,1920,1080,177,3,mvex,58.7,57.4,80.1,8835.6
+csv,sobel,1920,1080,177,3,mvex,120.7,117.5,136.4,17182.8
+csv,absdiff,1920,1080,177,3,mvex,70.2,66.9,187.5,29549.4
+csv,reduce,1920,1080,177,3,mvex_fused_nopf,75.8,75.1,103.5,6838.0
+csv,reduce,1920,1080,177,3,mvex_plain_pf,62.1,61.0,71.8,8348.8
+csv,reduce,1920,1080,177,3,mvex_plain_nopf,77.5,76.6,106.3,6690.5
+csv,u8_to_q6,1920,1080,236,4,mvex,31.8,31.2,1714.0,65111.6
+csv,norm,1920,1080,236,4,mvex,54.1,53.4,87.3,38314.2
+csv,gauss5,1920,1080,236,4,mvex,128.6,122.0,2987.4,16127.7
+csv,reduce,1920,1080,236,4,mvex,51.5,50.1,88.5,10070.5
+csv,sobel,1920,1080,236,4,mvex,103.1,102.1,121.2,20116.6
+csv,absdiff,1920,1080,236,4,mvex,55.2,52.4,168.7,37547.1
+csv,reduce,1920,1080,236,4,mvex_fused_nopf,62.9,62.0,98.7,8235.2
+csv,reduce,1920,1080,236,4,mvex_plain_pf,54.0,53.6,148.3,9591.7
+csv,reduce,1920,1080,236,4,mvex_plain_nopf,65.1,64.0,83.7,7967.2
+csv,reduce,1920,1080,2,2,mvex_scale,4436.4,4321.9,4790.4,116.9
+csv,gauss5,1920,1080,2,2,mvex_scale,11070.8,11050.5,11125.3,187.3
+csv,reduce,1920,1080,4,2,mvex_scale,2219.2,2153.3,4590.9,233.6
+csv,gauss5,1920,1080,4,2,mvex_scale,5574.6,5503.9,5679.9,372.0
+csv,reduce,1920,1080,8,2,mvex_scale,1201.2,1105.7,3000.2,431.6
+csv,gauss5,1920,1080,8,2,mvex_scale,2784.3,2728.3,2797.2,744.7
+csv,reduce,1920,1080,16,2,mvex_scale,595.9,531.5,1876.1,869.9
+csv,gauss5,1920,1080,16,2,mvex_scale,1395.8,1377.6,1466.9,1485.6
+csv,reduce,1920,1080,32,2,mvex_scale,335.2,283.4,1564.9,1546.5
+csv,gauss5,1920,1080,32,2,mvex_scale,733.1,672.1,738.7,2828.4
+csv,reduce,1920,1080,48,2,mvex_scale,185.8,168.6,1613.7,2789.7
+csv,gauss5,1920,1080,48,2,mvex_scale,466.3,453.1,537.4,4447.2
+csv,reduce,1920,1080,64,2,mvex_scale,171.1,109.3,856.4,3030.2
+csv,gauss5,1920,1080,64,2,mvex_scale,348.3,344.8,416.4,5952.9
+csv,reduce,1920,1080,96,2,mvex_scale,81.1,77.0,701.0,6393.2
+csv,gauss5,1920,1080,96,2,mvex_scale,233.2,230.6,280.3,8893.7
+team_outputs identical (card, every team run re-hashed against the single-thread output)
+m1_card_done ok
+rc 0

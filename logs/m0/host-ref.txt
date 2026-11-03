@@ -1,0 +1,20 @@
+vxop load+store   4e8dc9044328c432
+vxop bcast        c0fd2ecc85efc245
+vxop loadu        e19a17a4972b7db3
+vxop load_u8      d13d88857725ada9
+vxop add          bcf21794b1bc8649
+vxop sub          81a15b2c3688d751
+vxop mul          571fe652cb33732b
+vxop fma          10ed05f0f75c11b9
+vxop fnma         6280ae1a700a9044
+vxop fma_s+mul_s  ed738d1bd648cb1f
+vxop minmax       e085503f6fcdcfe5
+vxop abs          85635933ccfdf9b2
+vxop alignr       3bb3a188d29961b8
+vxop perm         b5e8fb1741d9c2d2
+vxop blend+cmp    cac713b6bab5d8a4
+vxop round_near   93a40909585dbb27
+vxop round_down   4c180a29256651af
+vxop hsum         d9ae0252d8cc977c
+subnormal 11169934e8c8e225 first_bits 8001c732
+fma_hash c029f0744630596c (MVEX)
