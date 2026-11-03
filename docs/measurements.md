@@ -514,3 +514,47 @@ A frame that lands during a job still waits for that job, up to about 10.5 ms be
 | L | 1,287, 1,260 | 6.31, 4.02 px | 0.518, 0.172 px | +21.5, +13.1 px over 39 s | +1.340, +0.456 px |
 
 **L still creeps,** +3.4, +3.0 px over 126 s of the same run, steadily, where R wanders within 0.27 px with no direction. An earlier statement in the project's notes that L's error was a random walk was wrong: the first run's numbers show a steady crawl. An LED in L's view moved -0.6, +0.7 px over the same stretch (`logs/live/attitude-20261103-074057.csv`), so at most a small part of it is the whole picture moving. Flow bias accumulating frame to frame and real change on the target are not yet told apart.
+
+## Generated frames (2026-11-03 08:15 to 08:50, card; 640x480 unless said; replay identical on every line)
+
+**Centre error on the real frames, px, median and p95, generated frames off and on.** `results/runs/`, the last run of each.
+
+| Scene | Off | On |
+| --- | --- | --- |
+| bigbox | 0.223, 0.301 | 0.084, 0.102 |
+| smallbox | 0.301, 0.693 | 0.296, 0.390 |
+| stillstart | 0.079, 0.140 | 0.059, 0.080 |
+| rotate | 0.363, 0.680 | 0.203, 0.471 |
+| hold | 0.018, 0.030 | 0.017, 0.028 |
+| swing | 0.003, 0.006 | 0.016, 0.034: **worse** |
+
+One run each, on a deterministic scene: there is no spread to give, and none to hide behind.
+
+**Cost per generated frame.** 1.68 to 1.93 ms at 640x480. At 1080p, `scripts/scene.sh bigbox 1920x1080 --frames 40 --framegen`: 5.95 ms median, 6.57 max. Stage means from the card's log (`scripts/vtrackd.sh log`), us:
+
+| Run | More pyramid | Scene | Search | Filter | Upscale | Middle | Blend | Pyramid | Total |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| Scene, 1080p, 34 frames | 117 | 423 | 2,787 | 648 | 394 | 246 | 990 | 372 | 5,977 |
+| Live L, 1080p, 144 frames | 72 | 409 | 2,785 | 640 | 408 | 595 | 1,718 | 404 | 6,631 |
+| Live R, 1080p, 144 frames | 71 | 414 | 2,774 | 638 | 415 | 437 | 1,440 | 410 | 6,109 |
+| Live D, 720p, 71 frames | 38 | 206 | 1,512 | 381 | 248 | 233 | 687 | 300 | 3,105 |
+
+My estimate from area before measuring 1080p was 13 ms. It was more than twice the measurement. Those live lines predate the early out on still blocks, whose effect at 640x480 on a busy scene was nil and whose effect live is not measured.
+
+**The rates, live.** `logs/live/track-20261103-083232.csv`, windows of 5 s with a region held on all three cameras: L 150 real and 150 generated results, R 150 and 150, D 75 and up to 75. That is 60, 60 and up to 30 a second, with the real frames at their full rate. These are results the tracker produced, not frames in the window. Observed: L and R on all but 0 to 2 real frames of those windows, on averages of 16 to 75 features, riders included. There is no like-for-like earlier figure: the log before this one held only results with a 3D flag. D read unobserved on 22 to 49 of 75 in its worst windows, and generated nothing while it did.
+
+## Losing and taking back (2026-11-03 08:35 to 08:50, card)
+
+The old rule ended a region after 2 s out of sight, its appearance erased. Measured on scene `comeback` (`--frames 240`: out of the picture for 3 s, back from the other side):
+
+| Build | Taken back | Error | Best match while away |
+| --- | --- | --- | --- |
+| The old rule | never: it had no memory left | | |
+| Kept, one memory holding background | frame 210, when the object reached the exact spot it was selected at, correlation 1.000 | 0.109 px | up to 0.52 |
+| The box closes on a moving region, half-pixel scoring | **frame 182**, the frame the object is 95 % visible, correlation 0.995 | 0.605 px | up to 0.44 |
+
+The region ran out of patience, read LOST for 101 results, and kept its track id. The first row of the table was not run: it is the code that was there. 
+
+**Retracted, on the way.** A gap of 1.57 s, a jump of 164 px and R's rate falling to 68 to 112 per 5 s, read from `logs/live/track-20261103-080810.csv` as a stall, were not. That log wrote only results with a 3D flag, so the gaps meant no 3D result. It now writes every result of a region.
+
+**All gates on this build:** `scripts/check.sh`, `logs/check/20261103-084917.txt`: 54 passed, 0 failed, 0 skipped, with `comeback` and eleven runs with generated frames among them, card = host on every result.

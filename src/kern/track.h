@@ -28,6 +28,11 @@ int tk_sets(const struct tracker *t);
 void tk_build(struct tracker *t, int set, const uint8_t *left, const uint8_t *right, const struct vt_msg *m);
 /* The rest of a frame, whose pyramid is complete in `set`. out is complete on return, except the cycle counts of the stages outside it. Thread: the track group's tid 0. */
 void tk_track(struct tracker *t, int set, const struct vt_msg *m, struct vt_result *out);
+/* After tk_build of a real frame into `set` and before its tk_track: makes the frame half way between it and the last real one, if frame generation is on and a region exists to gain from it. Returns the set it is in, to
+ * pass to tk_track with the message written to *gm, or -1 if there is none. A session of three sets, with real frame k in set k mod 3, the generated frame takes the set frame k + 1 will overwrite. */
+int tk_generate(struct tracker *t, int set, const struct vt_msg *m, struct vt_msg *gm);
+/* What frame generation cost so far, per stage, to stderr. */
+void tk_fg_report(const struct tracker *t, const char *name, double cycles_per_us);
 
 /* The plane a result names in debug_level: left camera, of the set it was computed in. NULL if there is none. */
 const struct vt_plane *tk_debug_plane(const struct tracker *t, int set, const struct vt_result *r);

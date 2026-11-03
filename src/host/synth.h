@@ -26,6 +26,7 @@ enum scene_id {
     SC_STILLSTART,  /* as bigbox, but the object stays still for 2 s after it is selected and only then moves: nothing tells it from the background until it does */
     SC_ROTATE,      /* as bigbox, and the object turns in the image plane at 30 degrees a second */
     SC_SWING,       /* as bigbox, swinging from side to side, up to 19 pixels a frame: real things accelerate and come back */
+    SC_COMEBACK,    /* as bigbox, leaves the picture to one side for 3 s, longer than any patience, and comes back from the other: 8 s, --frames 240 */
     SC_DUAL,        /* a second camera off to the side, turned 17.5 degrees, a different focal length, its shutter 11 ms late: the rig of two cameras that were never a stereo pair */
     SC_COUNT,
 };
@@ -60,7 +61,7 @@ void scene_truth_at(const struct scene *s, double seconds, struct truth *t);
 /* Renders one image: camera 0 left, 1 right. img: h rows of w bytes. Threads: its own pool of up to 14. */
 void scene_render(const struct scene *s, int frame, int camera, uint8_t *img);
 /* Where a surface point seen at (x0, y0) in frame f0 of the left image is in frame f1, if it lies on the object and is visible in both. Returns 0 otherwise. */
-int scene_map_left(const struct scene *s, int f0, double x0, double y0, int f1, double *x1, double *y1);
+int scene_map_left(const struct scene *s, double t0, double x0, double y0, double t1, double *x1, double *y1); /* seconds of scene time */
 enum scene_id scene_by_name(const char *name);
 const char *scene_name(enum scene_id id);
 

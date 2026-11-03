@@ -19,7 +19,7 @@ CARD_CFLAGS := --target=x86_64-unknown-linux-musl -march=knc --sysroot=$(KNC_SYS
 CARD_PROGS := vt_m0 vt_m1 vt_m2 vt_m3 vtrackd
 HOST_PROGS := m0_ref m1_ref m2_ref m3_ref vt_xfer vt_quit vt_run vt_replay vt_view vt_calib vt_stitch vt_align vt_gridpng vt_rigcheck vt_stars vt_mapstat vt_mapcheck vt_attitude vt_agree
 
-KERN_ALL := kern/img_ref kern/img_vx kern/lk_ref kern/lk_vx kern/detect kern/stereo kern/kalman kern/fuse kern/track kern/depth kern/still kern/attitude
+KERN_ALL := kern/img_ref kern/img_vx kern/lk_ref kern/lk_vx kern/detect kern/framegen kern/stereo kern/kalman kern/fuse kern/track kern/depth kern/still kern/attitude
 HOST_LIB := host/vt_link host/dataset host/synth host/run_opts host/score
 
 vt_m0_OBJS := card/m0_gate kern/m0_kern card/topo card/team

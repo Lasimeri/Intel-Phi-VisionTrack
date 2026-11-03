@@ -38,7 +38,9 @@ static double rms(double sum2, int n) { return n ? sqrt(sum2 / n) : 0.0; }
 struct score {
     const struct dataset *ds;
     FILE *csv;
-    struct stat_set epe, center, lat, reproj, nees, nis, st[VT_T_COUNT];
+    struct stat_set epe, center, center_gen, gen_us, lat, reproj, nees, nis, st[VT_T_COUNT];
+    double prev_s;
+    int n_generated;
     double s_meas, s_measz, s_pos, s_vel, z_vel;
     int n_meas, n_pos, n_zvel;
     int visible, observed_visible, n_observed, n_unobs, n_new, n_lost, n_reacq, n_metric, n_rej, n_amb, n_nofeat, feat_sum, first_id, id_changes, hidden, hidden_observed, metric_when_ambiguous, exc_results;
@@ -84,7 +86,18 @@ void score_frame(struct score *s, const struct vt_result *o, double lat_us, doub
     const int cam = (int)o->hdr.camera;
     /* The truth of this frame's own instant: a camera with a late shutter saw a later scene. */
     struct truth t;
-    scene_truth_at(sc, ((double)o->hdr.acq_ns - 1e9) * 1e-9, &t);
+    const double now_s = ((double)o->hdr.acq_ns - 1e9) * 1e-9;
+    scene_truth_at(sc, now_s, &t);
+    /* A generated frame is no observation: where the region was on it is kept apart, and the next real frame's motion runs from its instant. */
+    if (o->flags & VT_F_GENERATED) {
+        s->n_generated++;
+        stat_add(&s->gen_us, (double)o->cycles[VT_T_GEN] * us_per_cycle);
+        if (o->state == VT_ST_OBSERVED && t.on_screen && t.visible >= 0.5 && cam == 0)
+            stat_add(&s->center_gen, hypot((double)o->cx - t.u, (double)o->cy - t.v));
+        if (cam == 0)
+            s->prev_s = now_s;
+        return;
+    }
     const int after = fi > sc->select_frame && cam == 0;
     const int measured = o->state == VT_ST_OBSERVED;
     s->n_observed += measured;
@@ -127,12 +140,14 @@ void score_frame(struct score *s, const struct vt_result *o, double lat_us, doub
             double mx, my;
             if (f->flags & VT_FF_NEW)
                 continue;
-            if (scene_map_left(sc, s->prev_index, (double)f->x - (double)f->u, (double)f->y - (double)f->v, fi, &mx, &my))
+            if (scene_map_left(sc, s->prev_s, (double)f->x - (double)f->u, (double)f->y - (double)f->v, now_s, &mx, &my))
                 stat_add(&s->epe, hypot((double)f->x - mx, (double)f->y - my));
         }
     }
     if (cam == 0)
         s->prev_index = fi;
+    if (cam == 0)
+        s->prev_s = now_s;
     if (o->flags & (VT_F_3D_MEASURED | VT_F_3D_REJECTED)) {
         const double e[3] = {o->meas[0] - t.X, o->meas[1] - t.Y, o->meas[2] - t.Z};
         s->s_meas += e[0] * e[0] + e[1] * e[1] + e[2] * e[2];
@@ -192,6 +207,9 @@ void score_print(struct score *s, FILE *f, const char *mode, int results, int dr
     const double nees_mean = mean(&s->nees), nis_mean = mean(&s->nis);
     stat_sort(&s->epe);
     stat_sort(&s->center);
+    stat_sort(&s->center_gen);
+    stat_sort(&s->gen_us);
+    fprintf(f, " \"generated\":{\"results\":%d,\"center_err_px\":{\"n\":%d,\"median\":%.3f,\"p95\":%.3f,\"max\":%.3f},\"make_us\":{\"median\":%.1f,\"p95\":%.1f,\"max\":%.1f}},\n", s->n_generated, s->center_gen.n, pct(&s->center_gen, .5), pct(&s->center_gen, .95), top(&s->center_gen), pct(&s->gen_us, .5), pct(&s->gen_us, .95), top(&s->gen_us));
     stat_sort(&s->lat);
     stat_sort(&s->reproj);
     stat_sort(&s->nees);
@@ -253,6 +271,12 @@ int score_gate(struct score *s, FILE *f)
         NEED(cont >= 0.95, "continuity >= 0.95 with background in the box");
         NEED(center <= 4.0, "centre median <= 4 px: the region follows the object, not the background");
         NEED(pct(&s->center, .95) <= 12.0, "centre p95 <= 12 px");
+        break;
+    case SC_COMEBACK:
+        NEED(s->n_lost > 0, "the region really ran out of patience");
+        NEED(s->n_reacq >= 1, "and was taken back after it");
+        NEED(s->first_reacq >= 0 && s->reacq_err <= 3.0, "within 3 px");
+        NEED(center <= 4.0, "centre median <= 4 px over the frames it claims");
         break;
     case SC_HOLD:
         NEED(cont >= 0.99, "continuity >= 0.99");

@@ -216,6 +216,31 @@ static int build_one(struct flow *f)
     return 1;
 }
 
+/* The frame between the last real one and this one, tracked, and its result sent, before this one's. Waits for its own result's copy: `res` is written again at once. Nonzero if the channel refused or timed out. */
+static int send_generated(struct tracker *t, int set, const struct vt_msg *m, struct vt_result *res, struct vt_dma *dma, uint64_t *npub, uint64_t *last_dma, uint64_t res_phys, uint64_t host_res, uint64_t pub_addr)
+{
+    struct vt_msg gm;
+    const uint64_t t0 = vt_tsc();
+    const int g = tk_generate(t, set, m, &gm);
+    if (g < 0)
+        return 0;
+    const uint64_t t1 = vt_tsc();
+    tk_track(t, g, &gm, res);
+    res->cycles[VT_T_GEN] = t1 - t0;
+    (*npub)++;
+    res->seq = *npub;
+    *last_dma = vt_dma_copy(dma, res_phys, host_res + (*npub - 1) % VT_RES_SLOTS * VT_RES_BYTES, res->hdr.length, pub_addr, *npub);
+    if (!*last_dma) {
+        fprintf(stderr, "vtrackd: generated result copy refused\n");
+        return -1;
+    }
+    if (vt_dma_wait(dma, *last_dma, 5.0)) {
+        fprintf(stderr, "vtrackd: generated result DMA timed out\n");
+        return -1;
+    }
+    return 0;
+}
+
 static void *pyramid_main(void *arg)
 {
     struct flow *f = arg;
@@ -262,7 +287,7 @@ int session_track(struct vt_ctl *ctl, struct vt_dma *dma, const struct topo *top
     const size_t plane2 = cfg->dual ? plane_bytes((int)cfg->width2, (int)cfg->height2) : 0;
     const size_t plane3 = cfg->dual && cfg->width3 ? plane_bytes((int)cfg->width3, (int)cfg->height3) : 0;
     const int with_depth = cfg->dual && cfg->width3 && cfg->depth_planes;
-    const size_t need = (two ? 24 : 16) * plane + 16 * plane2 + 16 * plane3 + DEV_SLOTS * slot_bytes + (cfg->dual ? (128u << 20) : (64u << 20)) + (with_depth ? ld_bytes(cfg, n) : 0);
+    const size_t need = (two ? 26 : 20) * plane + 20 * plane2 + 20 * plane3 + DEV_SLOTS * slot_bytes + (cfg->dual ? (128u << 20) : (64u << 20)) + (with_depth ? ld_bytes(cfg, n) : 0);
     struct arena a;
     if (arena_open(&a, need))
         return -1;
@@ -369,6 +394,7 @@ int session_track(struct vt_ctl *ctl, struct vt_dma *dma, const struct topo *top
     memset(&map_msg, 0, sizeof map_msg);
     int map_wanted = 0;
     uint64_t depth_cycles = 0;
+    uint64_t npub = 0; /* results sent: one per frame taken, and one per frame generated */
     for (;;) {
         if (g.failed) {
             rc = -1;
@@ -438,10 +464,14 @@ int session_track(struct vt_ctl *ctl, struct vt_dma *dma, const struct topo *top
             const struct vt_msg *m = &g.msg[di];
             const int cam = (int)m->camera;
             cur = trk[cam];
-            set = (int)(cam_frames[cam]++ % 2);
+            set = (int)(cam_frames[cam]++ % (uint64_t)tk_sets(cur));
             const uint64_t t0 = vt_tsc();
             tk_build(cur, set, g.dev[di], NULL, m);
             const uint64_t t1 = vt_tsc();
+            if (send_generated(cur, set, m, res, dma, &npub, &last_dma, res_phys, host_res, pub_addr)) {
+                rc = -1;
+                break;
+            }
             tk_track(cur, set, m, res);
             const uint64_t seq_now = ctl->calib_seq;
             if (seq_now != calib_seen) {
@@ -476,6 +506,10 @@ int session_track(struct vt_ctl *ctl, struct vt_dma *dma, const struct topo *top
         } else {
             set = (int)(nres % (uint64_t)f.nsets);
             const struct built *b = &f.info[set];
+            if (send_generated(tr, set, &b->msg, res, dma, &npub, &last_dma, res_phys, host_res, pub_addr)) {
+                rc = -1;
+                break;
+            }
             tk_track(tr, set, &b->msg, res);
             nres++;
             res->seq = nres;
@@ -494,7 +528,8 @@ int session_track(struct vt_ctl *ctl, struct vt_dma *dma, const struct topo *top
                 break;
             }
         }
-        last_dma = vt_dma_copy(dma, res_phys, host_res + (nres - 1) % VT_RES_SLOTS * VT_RES_BYTES, res->hdr.length, pub_addr, nres);
+        npub++;
+        last_dma = vt_dma_copy(dma, res_phys, host_res + (npub - 1) % VT_RES_SLOTS * VT_RES_BYTES, res->hdr.length, pub_addr, npub);
         if (!last_dma) {
             fprintf(stderr, "vtrackd: result copy refused\n");
             rc = -1;
@@ -513,6 +548,12 @@ int session_track(struct vt_ctl *ctl, struct vt_dma *dma, const struct topo *top
         vt_dma_wait(dma, last_dma, 5.0);
     if (map_dma)
         vt_dma_wait(dma, map_dma, 5.0);
+    if (cfg->dual) {
+        for (uint32_t k = 0; k < vt_cameras(cfg); k++)
+            tk_fg_report(trk[k], "vtrackd", hz * 1e-6);
+    } else {
+        tk_fg_report(tr, "vtrackd", hz * 1e-6);
+    }
     team_destroy(tm);
     arena_close(&a);
     printf("vtrackd: track session: %llu results (card)\n", (unsigned long long)nres);

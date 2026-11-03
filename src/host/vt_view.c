@@ -76,6 +76,7 @@ struct cam {
     uint64_t results;
     uint64_t recv_ns;
     struct rate { double t0; uint64_t n0; double value; } r_new, r_raw, r_res;
+    uint64_t generated; /* of its results, how many came from generated frames */
     pthread_t thread;
     /* An integrated snapshot under way: the sum of the frames so far. */
     uint32_t *sum;
@@ -116,7 +117,7 @@ static struct {
     double trail[TRAIL][3];
     int trail_n, trail_i;
     /* The depth map: the link thread fills the buffer that is not current, and only then makes it current. */
-    int map_i, depth_avg, depth_planes, vectors_all, save_map, flow_level, session_restart;
+    int map_i, depth_avg, depth_planes, vectors_all, save_map, flow_level, session_restart, framegen;
     uint64_t map_seq;
     struct rate map_rate;
 } A;
@@ -259,6 +260,7 @@ static void session_config(struct vt_config *c)
         c->motion_px = 0.25f * (float)(1 << (VT_DEPTH_LEVEL - A.flow_level));
         c->motion_grey = 2.0f;
         c->flow_level = (uint32_t)A.flow_level;
+        c->framegen = (uint32_t)A.framegen;
     }
 }
 
@@ -430,13 +432,33 @@ static void *link_main(void *arg)
             const uint32_t k = from < (uint32_t)A.ncam ? from : 0;
             struct cam *K = &A.c[k];
             pthread_mutex_lock(&A.m);
-            memcpy(&K->last, src, head);
+            const struct vt_result *fresh = (const struct vt_result *)src;
+            const int generated = (fresh->flags & VT_F_GENERATED) != 0;
+            if (generated) {
+                /* A generated frame moves the region and its features and measures nothing: what is known in 3D stays as the last real frame left it. */
+                K->last.state = fresh->state;
+                K->last.flags |= VT_F_GENERATED;
+                K->last.hdr.acq_ns = fresh->hdr.acq_ns;
+                K->last.hdr.instance = fresh->hdr.instance;
+                K->last.cx = fresh->cx;
+                K->last.cy = fresh->cy;
+                K->last.w = fresh->w;
+                K->last.h = fresh->h;
+                K->last.rate_u = fresh->rate_u;
+                K->last.rate_v = fresh->rate_v;
+                K->last.inliers = fresh->inliers;
+                K->last.nfeat = fresh->nfeat;
+                K->last.reacq_ncc = fresh->reacq_ncc;
+            } else {
+                memcpy(&K->last, src, head);
+            }
             memcpy(K->last.feat, src + head, (size_t)K->last.nfeat * sizeof(struct vt_feat_out));
             K->results++;
+            K->generated += generated;
             K->recv_ns = vt_now_ns();
             A.exceptions = c->exceptions;
             /* Every 3D result, as the card computed it: what any claim about the live numbers is measured from, not what a screen showed. */
-            if (K->last.flags & (VT_F_3D_MEASURED | VT_F_3D_REJECTED | VT_F_METRIC)) {
+            if (K->last.state != VT_ST_NONE || (K->last.flags & (VT_F_3D_MEASURED | VT_F_3D_REJECTED | VT_F_METRIC))) {
                 if (!track_csv) {
                     char path[80];
                     const time_t wall = time(NULL);
@@ -453,13 +475,13 @@ static void *link_main(void *arg)
                     fflush(track_csv);
                 }
             }
-            if (k >= 1) {
+            if (k >= 1 && !generated) {
                 if (!pf[k])
                     pf[k] = fopen(k == 1 ? PAIRS_LR_PATH : PAIRS_LD_PATH, "a");
                 if (pf[k])
                     note_pair(pf[k], &A.c[0].last, &K->last, pair_last[k]);
             }
-            if (K->last.flags & VT_F_METRIC) {
+            if ((K->last.flags & VT_F_METRIC) && !generated) {
                 memcpy(A.trail[A.trail_i], K->last.pos, sizeof A.trail[0]);
                 A.trail_i = (A.trail_i + 1) % TRAIL;
                 if (A.trail_n < TRAIL)
@@ -798,6 +820,9 @@ static void apply_command_file(void)
         A.save_map = 1;
     } else if (sscanf(line, "flow %d", &n) == 1 && n >= 0 && n <= VT_DEPTH_LEVEL) {
         A.flow_level = n;
+        __atomic_store_n(&A.session_restart, 1, __ATOMIC_RELEASE);
+    } else if (sscanf(line, "framegen %d", &n) == 1 && (n == 0 || n == 1)) {
+        A.framegen = n;
         __atomic_store_n(&A.session_restart, 1, __ATOMIC_RELEASE);
     }
     pthread_mutex_unlock(&A.m);
@@ -1140,6 +1165,7 @@ int main(int argc, char **argv)
     A.depth_planes = 64;
     /* Half of native: the user's choice, 2026-11-03, native being laggy to use though it holds its frame rate (capture to result 47.5 ms, here 35.4). docs/measurements.md. */
     A.flow_level = 1;
+    A.framegen = 1;
     int at_x = -1, at_y = -1;
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--dev") && i + 1 < argc) a->dev = argv[++i];
@@ -1160,6 +1186,7 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--feat") && i + 1 < argc) A.feat = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--avg") && i + 1 < argc) A.depth_avg = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--flow") && i + 1 < argc) A.flow_level = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--framegen") && i + 1 < argc) A.framegen = atoi(argv[++i]) != 0;
         else if (!strcmp(argv[i], "--planes") && i + 1 < argc) A.depth_planes = atoi(argv[++i]);
         else {
             fprintf(stderr, "vt_view: unknown option %s\n", argv[i]);
@@ -1467,6 +1494,8 @@ int main(int argc, char **argv)
                     panel_line(&v, &y, GREY, " %+6.1f %+6.1f px/s  features %u/%d", (double)q->rate_u, (double)q->rate_v, q->nfeat, feat);
             } else if (tracking && (q->flags & VT_F_NO_FEATURES)) {
                 panel_line(&v, &y, WHITE, " too little texture there");
+            } else if (tracking && q->state == VT_ST_LOST) {
+                panel_line(&v, &y, WHITE, " searching the whole picture, best match %.2f", (double)q->reacq_ncc);
             }
         }
         y += 6;

@@ -88,11 +88,12 @@ int main(int argc, char **argv)
     if (vt_session_start(&l, &o.cfg, 30.0))
         return 3;
     const int cams = o.dual ? 2 : 1, nmsg = nframes * cams;
-    struct vt_result *res = malloc(sizeof(struct vt_result) * (size_t)nmsg);
-    uint64_t *t_recv = calloc((size_t)nmsg, 8), *t_pub = calloc((size_t)nmsg, 8);
+    const int nresults = o.cfg.framegen ? 2 * nmsg : nmsg; /* a generated frame's result as well as each real one's */
+    struct vt_result *res = malloc(sizeof(struct vt_result) * (size_t)nresults);
+    uint64_t *t_recv = calloc((size_t)nresults, 8), *t_pub = calloc((size_t)nmsg, 8);
     if (!res || !t_recv || !t_pub)
         return 2;
-    struct recv rcv = {.l = &l, .res = res, .t_recv = t_recv, .max = nmsg};
+    struct recv rcv = {.l = &l, .res = res, .t_recv = t_recv, .max = nresults};
     pthread_t rt;
     pthread_create(&rt, NULL, recv_main, &rcv);
 
@@ -147,10 +148,12 @@ int main(int argc, char **argv)
     int waited = 0;
     for (;;) {
         const int n = __atomic_load_n(&rcv.count, __ATOMIC_ACQUIRE);
-        uint64_t skipped = 0;
-        for (int i = 0; i < n; i++)
+        uint64_t skipped = 0, real = 0;
+        for (int i = 0; i < n; i++) {
             skipped += res[i].frames_skipped;
-        if ((uint64_t)n + skipped >= (uint64_t)nsent)
+            real += !(res[i].flags & VT_F_GENERATED);
+        }
+        if (real + skipped >= (uint64_t)nsent)
             break;
         if (waited++ > 10000) {
             fprintf(stderr, "host: only %d results of %d frames after 10 s (exceptions %llu, last %llu)\n", n, nsent, (unsigned long long)c->exceptions, (unsigned long long)c->last_exception);

@@ -62,7 +62,47 @@ An operator's drag holds the thing and whatever is around it. The first tracker 
 
 **Detection is on the team.** It ran on the tracking thread: 6.1 to 8.0 ms for 384 x 307, on every frame while features were low, and judging corners by neighbourhood took it to 26.37 ms on a selection frame. The tensor, response and cell stages now run on all threads on rows that do not depend on each other, and the last stage scans a vector at a time and orders candidates by a radix sort over the complement of their score's bits, integers only. 3.78 ms. Reseeding now counts members, not riders, and waits at least 4 frames.
 
-**Appearance search reaches as far in the picture at any level.** It counted pixels of its own level, so at 1/8 scale it reached 288 px (arithmetic), and took a region 160 px away live.
+**A moving region closes its box, once.** Waiting for a sign of what left failed: as an object set off, 51 of 128 features died in the flow, 7 parted and none was riding, so the box and its picture of the background stayed.
+
+**Two tolerances.** Who places the centre: the rigid core, within 1.25 px or three times its spread, whose anchors give way 3 % a frame. Who stays a member: within three frames' motion, up to 12 px at 1920 wide, whose anchors give way up to 12.5 % a frame. One tolerance for both moved the centre 2.5 px on `bigbox`, by letting features straddling the outline vote; 1.25 px for both threw out nearly everything on a real thing moving several pixels a frame.
+
+**A still region holds a frame.** After 15 frames under 0.1 px a frame its members track against that frame rather than the last, starting from where they stood, so no earlier frame's error stays in the answer. A feature the held frame no longer explains goes on from frame to frame; when under half the members are in the frame, a new one is held.
+
+### Losing and taking back
+
+There is no time-out. Past its patience (2 s live) a region claims no position and reads LOST, but only the operator ends it. It used to end there, its appearance erased, and could never come back.
+
+| Part | What it does |
+| --- | --- |
+| Memory | Four appearances: the first since the box closed, never replaced, and about 0.5, 2 and 8 s old, from frames over 90 % agreed. Each has its level, offset and the box it had. The box closing clears them, since until then they may hold background |
+| Near the prediction | While predicting, every memory within 12 to 36 px, as far in the picture at any level. Believed at 0.82 |
+| The whole picture | After 8 frames, or once lost: one memory a frame, a map of the best per 16 x 16 places, on the team. Believed at 0.88, 0.04 clear of any other peak, and again on the next frame within 24 px |
+| Half pixels | The map's top 8 cells are scored again at half-pixel steps before anything is judged: on fine texture a whole-pixel search at 1/4 scale can stand half a pixel off and read 0.5 at the right place |
+| Coasting | A lost region's rate decays 5 % a frame: a thing out of sight is not known to keep going |
+
+### Generated frames (user's direction, 2026-11-03)
+
+Between two real frames the card makes one more for each camera with a region, which takes L and R to an effective 60 frames a second and D to 30.
+
+| Stage | What | Whose |
+| --- | --- | --- |
+| Pyramid | The tracker's own levels from 1 up, then more, to at most 7 levels | |
+| Search | Each 8 x 8 block, from the level above's estimate, tries 256 places by SAD. A lane per horizontal offset, the row slid with `valignd` instead of loaded 8 times, unrolled since the slide's count is an immediate. No motion wins on the last level if it matches as well | AMD's |
+| Filter | Of the 3 x 3 around, the vector with the least squared difference from the rest | AMD's |
+| Upscale | Each block of the next level picks among four by SAD over 4 x 4 | AMD's |
+| Early out | On the last level a block the estimate already explains, within 2 grey levels a pixel, is not searched | this project's |
+| Middle vector | The field says where a block of the newer frame came from; a generated frame needs what is at its own instant. Each block tries the 3 x 3 of vectors around and none, moving both frames half way, and takes the one on which they agree | this project's |
+| Blend | Both frames moved half way, under triangular windows over the nine blocks around each tile, so that no block's edge shows; one vector over all nine is a plain average | this project's |
+
+FSR 3's interpolation leans on a game's own motion vectors, which a camera does not have, so only the field is AMD's. The source is MIT licensed: `LICENSES/FidelityFX-MIT.txt`.
+
+**Why on the card and not AMD's shaders on the GPU.** The only GPU here is an RTX 3090 Ti, so AMF is out, and the SDK needs DX12 or Vulkan. Running its shaders there would put image processing on a second chip, with a copy each way per frame. On the card both frames and the result are already in its memory.
+
+**A generated frame moves features and decides nothing.** Its pixels are invented. Membership, reseeding, appearance, the search for a lost region, stereo and the filter run on real frames only. A feature whose flow fails on it goes where the model says. If too little agrees, the frame is passed over and the next real frame tracks from the last real one. The window keeps the 3D of the last real frame.
+
+**It costs a real frame milliseconds, not a frame.** A generated frame needs the newer real frame, so it is made once that frame has landed, and its result reports an instant half a frame old. The real frame's own result waits for it: about 6 ms to make and 1 to track at 1080p (arithmetic from the stages; the latency itself is not yet measured live).
+
+**What it can and cannot do.** It adds no information: everything in a generated frame comes from the two real ones. What it gives the tracker is two half steps for one whole one, which is why it helps where features are lost or torn between motions, and adds a little noise where nothing was wrong (`swing`).
 
 ## Three cameras (user's direction, 2026-11-03)
 

@@ -25,6 +25,7 @@ Every scene, always: a hidden region never reads as observed, and the track id d
 | rotate | as bigbox, turning 30 degrees a second: no cluster of motion to find | >= 0.95 | | <= 4 px | | centre p95 <= 12 px |
 | swing | as bigbox, swinging to and fro, up to 19 px a frame | >= 0.95 | | <= 4 px | | centre p95 <= 12 px |
 | hold | a still object under noise of sigma 4: any travel of the region is error | >= 0.99 | | <= 0.5 px | | centre p95 <= 1 px |
+| comeback | as bigbox, out of the picture to one side for 3 s, past any patience, and back from the other: `--frames 240` | | | <= 4 px | | runs out of patience, is taken back, within 3 px; never reads observed while away |
 | dual | two independently tracked views, rotated, focal lengths differ, shutter 11 ms apart; TRUE calibration given (`scene.sh dual 640x480 --dual --gate`) | see `score_gate` | | | <= 15 mm | proves the fusion mechanism, not any calibration. Set from the measured 11.20 mm at 4 m with little parallax: the first limit, 10 mm, was written before the scene had ever run and failed it |
 
 The depth map has no scene here, by the user's direction: it runs on the real room, which has no per-pixel truth. Its checks are in [measurements.md](../docs/measurements.md): card against host hash over real frames (a gate in `check.sh`, where those frames exist), a deliberately rotated pose must lose, the sweep's depth against depths triangulated from landmarks (`vt_mapcheck`), and physical sizes.

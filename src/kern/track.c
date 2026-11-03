@@ -9,6 +9,7 @@
 #include <string.h>
 
 #include "detect.h"
+#include "framegen.h"
 #include "img.h"
 #include "kalman.h"
 #include "lk.h"
@@ -22,6 +23,11 @@
 /* Telling what was selected from what surrounds it: region_from_flow. */
 #define RIGID_TOL 1.25L          /* pixels, |x| + |y|: further than this from where the rigid model puts it (or 3 x the members' spread, on a noisy picture), a feature is not moving with the region */
 #define ANCHOR_LEAK 0.03L        /* of its deviation a member's anchor gives way each frame: about 33 frames to forgive a slowly changing shape */
+#define ANCHOR_LEAK_SPEED 0.05L  /* and more as the region moves, per pixel a frame, */
+#define ANCHOR_LEAK_MOVING 0.125L /* up to about 8 frames */
+#define TOL_SPEED 3.0L           /* the tolerance is at least this many frames' motion of the region, */
+#define TOL_CAP_OF_WIDTH 0.00625L /* up to this much of the image's width: 12 px at 1920 */
+#define COAST_DAMP 0.95L         /* a lost region's rate, kept this much per frame: a thing out of sight is not known to keep going */
 #define MOVED_MEMORY 0.97L       /* a feature's own motion, remembered over about 33 frames: how a slow mover is told from a still thing */
 #define SPREAD_MEMORY 0.9L       /* the members' spread, remembered over about 10 frames */
 #define SECOND_SHARE 0.15L       /* of the votes: less than this is not a second thing in the box */
@@ -37,7 +43,23 @@
 #define GROW_REACH 1.6L          /* a closed box looks this far beyond itself for more of the thing */
 #define GROW_MOTION 0.1L         /* pixels a frame, |u| + |v|: a closed region moving slower than this proves nothing about a new feature, and takes none in */
 #define RECENTRE_RATE 0.05L      /* of the way to the middle of the members, per frame, in a region that found a smaller thing in its box */
-#define REACQ_MIN_STEPS 2        /* the appearance search, at least this far in pixels of its level */
+#define HOLD_STILL 0.1L          /* pixels a frame, |u| + |v|: a region slower than this is standing still */
+#define HOLD_AFTER 15            /* frames standing still before a frame is held */
+#define REACQ_MIN_STEPS 2       /* the appearance search, at least this far in pixels of its level */
+#define REACQ_FAR_AFTER 8       /* frames out of flow before the whole picture is searched as well */
+#define REACQ_FAR_NCC 0.88L     /* far from any prediction, believed at this correlation, */
+#define REACQ_FAR_CLEAR 0.04L   /* this far above the best peak elsewhere, */
+#define REACQ_AGAIN_PX 24       /* and again on the next frame within these full-resolution pixels */
+#define SEARCH_CELL 16          /* template positions to a cell of the search's map */
+#define SEARCH_TOP 8            /* cells of the map looked at again in half pixels */
+#define APP_SLOTS 4             /* appearances remembered */
+
+/* One remembered appearance: a zero-mean template at its level, its sub-pixel offset from the region's centre, and the region's size when it was taken. */
+struct app_slot {
+    float *pix;
+    float norm, fx, fy, rw, rh;
+    int level, valid;
+};
 #define SPACING_MIN 6.0L        /* pixels between features: at most the configured spacing, closer in a small box so that a small thing gets enough of them */
 #define SPACING_BUDGET 1.5L      /* the spacing that would fill the feature budget this many times over */
 
@@ -80,16 +102,32 @@ struct tracker {
     struct lk_out *flow;
     long double *p3;
     /* appearance, for taking a lost region back */
-    float *app;
-    float app_norm, app_fx, app_fy; /* the template's sub-pixel offset from the region's centre */
-    int app_level, have_app;
+    struct app_slot app[APP_SLOTS];
+    uint32_t app_ticks;
+    int app_turn;
+    int cand_run, cand_slot; /* seen far away last frame, not yet believed */
+    float cand_x, cand_y;
+    float *sc_v; /* the search's map, a best per cell */
+    int *sc_x, *sc_y;
     /* the rigid model: region_from_flow. Each feature's anchor, own remembered motion, and age. */
     float *fax, *fay, *fmu, *fmv;
     uint8_t *fage;
-    float ra, rb, spread;
+    float ra, rb, spread, speed;
     float gw, gh; /* the operator's box, scaled with the region */
     int split_run, want_app, closed, recentring;
     struct detect_job det;
+    /* A frame held: a member tracked against it cannot accumulate anything. Each feature's place in that frame, negative if it has none. */
+    struct vt_plane key[VT_MAX_LEVELS];
+    float *fkx, *fky;
+    int hold, still_run;
+    /* Frame generation. The pyramid goes on above the tracker's own levels, per set; the field starts at the tracker's level 1. */
+    struct fg_job fg;
+    struct vt_plane fg_more[3][FG_MAX_LEVELS];
+    int fg_levels, fg_hist_set, gen_skip;
+    uint8_t fg_ready[3];
+    void *fg_mem;
+    uint64_t fg_cycles[8], fg_runs;
+    uint64_t last_est_ns;
     /* filter */
     struct kf kf;
     uint64_t last_meas_ns;
@@ -97,7 +135,8 @@ struct tracker {
 
 /* ---- parallel jobs ---- */
 
-enum { OP_U8, OP_NORM_IN, OP_GAUSS_IN, OP_REDUCE, OP_DIFF, OP_LK, OP_STEREO, OP_SEARCH, OP_DET_TENSOR, OP_DET_RESPONSE, OP_DET_CELLS };
+enum { OP_U8, OP_NORM_IN, OP_GAUSS_IN, OP_REDUCE, OP_DIFF, OP_LK, OP_STEREO, OP_SEARCH, OP_KEY_COPY, OP_DET_TENSOR, OP_DET_RESPONSE, OP_DET_CELLS, OP_FG_MORE, OP_FG_HIST_A, OP_FG_HIST_B, OP_FG_SEARCH, OP_FG_FILTER, OP_FG_UP, OP_FG_MID, OP_FG_BLEND, OP_FG_PAD };
+#define FG_CHUNK 16 /* blocks taken at a time */
 
 struct job {
     struct tracker *t;
@@ -107,7 +146,7 @@ struct job {
     float gain_offset[2];
     int next VT_CACHELINE;     /* dynamic work: points, candidate rows */
     float partial[256 * 16] VT_CACHELINE; /* per-thread results, a line each */
-    int radius, xc, yc;
+    int slot, x0, x1, y0, y1, step, cell_cols, cell_rows; /* the appearance search */
 };
 
 static inline int row_of(int rows, int tid, int n) { return (int)((long)rows * tid / n); }
@@ -206,6 +245,23 @@ static void job_main(void *arg, int tid, int n)
             const int i = __atomic_fetch_add(&j->next, 1, __ATOMIC_RELAXED);
             if (i >= t->nf)
                 break;
+            /* From where it stood in the held frame, starting from where it stood last frame: no error of an earlier frame stays in the answer. A feature the held frame no longer explains goes on from frame to frame. */
+            const float kx = t->fkx[i], ky = t->fky[i];
+            if (t->hold && kx >= 0.0f) {
+                const float gx = (float)(R(t->fx[i]) - R(kx)), gy = (float)(R(t->fy[i]) - R(ky));
+                if (x87) {
+                    lk_track_ref(t->key, J, t->levels - 1, &t->lk, kx, ky, gx, gy, &t->flow[i], t->tiles[tid]);
+                    if (t->c.fb_max > 0.0f)
+                        lk_flowback_ref(t->key, J, t->levels - 1, &t->lk, kx, ky, t->c.fb_max, &t->flow[i], t->tiles[tid]);
+                } else {
+                    lk_track_vx(t->key, J, t->levels - 1, &t->lk, kx, ky, gx, gy, &t->flow[i], t->tiles[tid]);
+                    if (t->c.fb_max > 0.0f)
+                        lk_flowback_vx(t->key, J, t->levels - 1, &t->lk, kx, ky, t->c.fb_max, &t->flow[i], t->tiles[tid]);
+                }
+                if (!t->flow[i].status)
+                    continue;
+                t->fkx[i] = -1.0f;
+            }
             if (x87) {
                 lk_track_ref(I, J, t->levels - 1, &t->lk, t->fx[i], t->fy[i], 0.0f, 0.0f, &t->flow[i], t->tiles[tid]);
                 if (t->c.fb_max > 0.0f)
@@ -227,31 +283,96 @@ static void job_main(void *arg, int tid, int n)
         }
         break;
     case OP_SEARCH: {
-        /* The best correlation of this thread's candidate rows; a line of `partial` per thread. */
-        float *out = &j->partial[tid * 16];
-        real best = -2.0L;
-        int bx = 0, by = 0;
-        const struct vt_plane *pl = &t->pyr[t->cur][0].l[t->app_level];
+        /* The best correlation of each cell of 16 x 16 positions. A thread takes whole rows of cells, each worked in one order, so the answer is the same at any thread count, and more than one peak can be seen. */
+        const struct app_slot *a = &t->app[j->slot];
+        const struct vt_plane *pl = &t->pyr[t->cur][0].l[a->level];
         for (;;) {
-            const int r = __atomic_fetch_add(&j->next, 1, __ATOMIC_RELAXED);
-            if (r > 2 * j->radius)
+            const int cr = __atomic_fetch_add(&j->next, 1, __ATOMIC_RELAXED);
+            if (cr >= j->cell_rows)
                 break;
-            const int y = j->yc - j->radius + r;
-            for (int x = j->xc - j->radius; x <= j->xc + j->radius; x++) {
-                const real v = search_at(pl, t->app, R(t->app_norm), x, y);
-                /* Ties broken by position: the same answer at any thread count. */
-                if (v > best || (v == best && (y < by || (y == by && x < bx)))) {
-                    best = v;
-                    bx = x;
-                    by = y;
+            for (int c = 0; c < j->cell_cols; c++)
+                t->sc_v[cr * j->cell_cols + c] = -2.0f;
+            const int y0 = j->y0 + cr * SEARCH_CELL, y1 = y0 + SEARCH_CELL <= j->y1 + 1 ? y0 + SEARCH_CELL : j->y1 + 1;
+            for (int y = y0; y < y1; y += j->step)
+                for (int x = j->x0; x <= j->x1; x += j->step) {
+                    const int cell = cr * j->cell_cols + (x - j->x0) / SEARCH_CELL;
+                    const float v = (float)search_at(pl, a->pix, R(a->norm), x, y);
+                    if (v > t->sc_v[cell]) {
+                        t->sc_v[cell] = v;
+                        t->sc_x[cell] = x;
+                        t->sc_y[cell] = y;
+                    }
                 }
-            }
         }
-        out[0] = (float)best;
-        out[1] = (float)bx;
-        out[2] = (float)by;
         break;
     }
+    case OP_FG_MORE: {
+        /* One more level of the field's pyramid, above the tracker's. */
+        const struct vt_plane *d = &t->fg_more[j->set][j->level], *s = j->level == t->levels - 1 ? &t->pyr[j->set][0].l[t->levels - 1] : &t->fg_more[j->set][j->level - 1];
+        const int y0 = row_of(d->h, tid, n), y1 = row_of(d->h, tid + 1, n);
+        img_reduce_vx(d, s, y0, y1);
+        img_pad_rows(d, y0, y1);
+        break;
+    }
+    case OP_FG_HIST_A:
+    case OP_FG_HIST_B:
+        for (;;) {
+            const int s = __atomic_fetch_add(&j->next, 1, __ATOMIC_RELAXED);
+            if (s >= FG_SECTIONS)
+                break;
+            if (j->op == OP_FG_HIST_A)
+                fg_hist_section(&t->fg.a[1], t->fg.hist_a, s);
+            else
+                fg_hist_section(&t->fg.b[1], t->fg.hist_b, s);
+        }
+        break;
+    case OP_FG_SEARCH:
+    case OP_FG_FILTER:
+    case OP_FG_UP:
+    case OP_FG_MID: {
+        const struct fg_field *field = j->op == OP_FG_UP ? &t->fg.up[j->level - 1] : j->op == OP_FG_MID ? &t->fg.mid : &t->fg.raw[j->level];
+        const int count = field->w * field->h;
+        for (;;) {
+            const int i = __atomic_fetch_add(&j->next, FG_CHUNK, __ATOMIC_RELAXED);
+            if (i >= count)
+                break;
+            const int e = i + FG_CHUNK < count ? i + FG_CHUNK : count;
+            if (j->op == OP_FG_SEARCH)
+                fg_search(&t->fg, j->level, i, e);
+            else if (j->op == OP_FG_FILTER)
+                fg_filter(&t->fg, j->level, i, e);
+            else if (j->op == OP_FG_UP)
+                fg_upscale(&t->fg, j->level, i, e);
+            else
+                fg_mid_vectors(&t->fg, i, e);
+        }
+        break;
+    }
+    case OP_FG_BLEND: {
+        const int count = fg_tiles(&t->fg);
+        for (;;) {
+            const int i = __atomic_fetch_add(&j->next, FG_CHUNK, __ATOMIC_RELAXED);
+            if (i >= count)
+                break;
+            fg_blend(&t->fg, i, i + FG_CHUNK < count ? i + FG_CHUNK : count);
+        }
+        break;
+    }
+    case OP_FG_PAD:
+        img_pad_rows(&t->fg.out, row_of(t->fg.out.h, tid, n), row_of(t->fg.out.h, tid + 1, n));
+        break;
+    case OP_KEY_COPY:
+        for (int L = 0; L < t->levels; L++) {
+            const struct vt_plane *s = &t->pyr[t->cur][0].l[L], *k = &t->key[L];
+            const int all = s->h + 2 * VT_PAD_Y, y0 = row_of(all, tid, n), y1 = row_of(all, tid + 1, n);
+            for (int y = y0; y < y1; y++) {
+                const float *from = plane_row(s, y - VT_PAD_Y) - VT_PAD_X;
+                float *to = plane_row(k, y - VT_PAD_Y) - VT_PAD_X;
+                for (int x = 0; x < s->stride; x += VX_LANES)
+                    vx_store_nr(to + x, vx_load(from + x));
+            }
+        }
+        break;
     case OP_DET_TENSOR: {
         const int rows = t->det.rows + 4;
         detect_tensor(&t->det, row_of(rows, tid, n), row_of(rows, tid + 1, n));
@@ -326,7 +447,11 @@ struct tracker *tk_create(const struct vt_config *cfg, int threads_pyr, int thre
     t->h = (int)cfg->height;
     t->levels = (int)cfg->levels;
     t->threads_track = threads_track;
-    t->nsets = cfg->pipelines == 2 ? MAX_SETS : 2;
+    t->nsets = cfg->pipelines == 2 ? MAX_SETS : cfg->framegen ? 3 : 2;
+    if (cfg->framegen && (cfg->pipelines == 2 || cfg->levels < 3)) {
+        fprintf(stderr, "track: frame generation needs one pipeline and three pyramid levels\n");
+        return NULL;
+    }
     t->b_contrast = cfg->contrast;
     t->b_pre_gauss = cfg->pre_gauss;
     t->debug_level = -1;
@@ -379,14 +504,52 @@ struct tracker *tk_create(const struct vt_config *cfg, int threads_pyr, int thre
     t->fflag = need(alloc, actx, nf * sizeof(uint32_t));
     t->flow = need(alloc, actx, nf * sizeof(struct lk_out));
     t->p3 = need(alloc, actx, nf * 3 * sizeof(long double));
-    t->app = need(alloc, actx, APP_W * APP_H * sizeof(float));
+    for (int i = 0; i < APP_SLOTS; i++) {
+        t->app[i].pix = need(alloc, actx, APP_W * APP_H * sizeof(float));
+        if (!t->app[i].pix)
+            return NULL;
+    }
+    const size_t search_cells = (size_t)(t->w / SEARCH_CELL + 2) * (size_t)(t->h / SEARCH_CELL + 2);
+    t->sc_v = need(alloc, actx, search_cells * sizeof(float));
+    t->sc_x = need(alloc, actx, search_cells * sizeof(int));
+    t->sc_y = need(alloc, actx, search_cells * sizeof(int));
     t->fax = need(alloc, actx, nf * sizeof(float));
     t->fay = need(alloc, actx, nf * sizeof(float));
     t->fmu = need(alloc, actx, nf * sizeof(float));
     t->fmv = need(alloc, actx, nf * sizeof(float));
     t->fage = need(alloc, actx, nf);
+    t->fkx = need(alloc, actx, nf * sizeof(float));
+    t->fky = need(alloc, actx, nf * sizeof(float));
     t->ra = 1.0f;
-    if (!t->det_scratch || !t->fx || !t->fy || !t->fxr || !t->fyr || !t->fdisp || !t->fsigma || !t->fu || !t->fv || !t->fz || !t->fflag || !t->flow || !t->p3 || !t->app || !t->fax || !t->fay || !t->fmu || !t->fmv || !t->fage) {
+    t->fg_hist_set = -1;
+    if (cfg->framegen) {
+        /* The field starts at the tracker's level 1 and goes up as far as AMD's seven levels, while a level is still wide enough to hold a block's search. */
+        int w = (t->w + 1) / 2, h = (t->h + 1) / 2, count = 0;
+        for (int i = 0; i < FG_MAX_LEVELS && w >= 16 && h >= 16; i++) {
+            count++;
+            if (i >= t->levels - 1)
+                for (int s = 0; s < 3; s++)
+                    if (zeroed_plane(&t->fg_more[s][i], w, h, alloc, actx))
+                        return NULL;
+            w = (w + 1) / 2;
+            h = (h + 1) / 2;
+        }
+        t->fg_levels = count;
+        t->fg_mem = need(alloc, actx, fg_bytes((t->w + 1) / 2, (t->h + 1) / 2, count));
+        if (!t->fg_mem)
+            return NULL;
+        fg_init(&t->fg, t->fg_mem, (t->w + 1) / 2, (t->h + 1) / 2, count);
+    }
+    {
+        int w = t->w, h = t->h;
+        for (int L = 0; L < t->levels; L++) {
+            if (zeroed_plane(&t->key[L], w, h, alloc, actx))
+                return NULL;
+            w = (w + 1) / 2;
+            h = (h + 1) / 2;
+        }
+    }
+    if (!t->det_scratch || !t->fx || !t->fy || !t->fxr || !t->fyr || !t->fdisp || !t->fsigma || !t->fu || !t->fv || !t->fz || !t->fflag || !t->flow || !t->p3 || !t->sc_v || !t->sc_x || !t->sc_y || !t->fax || !t->fay || !t->fmu || !t->fmv || !t->fage || !t->fkx || !t->fky) {
         fprintf(stderr, "track: no memory for the feature tables\n");
         return NULL;
     }
@@ -415,6 +578,8 @@ void tk_build(struct tracker *t, int set, const uint8_t *left, const uint8_t *ri
     const int alg = m->algorithm == VT_ALG_X87 ? VT_ALG_X87 : VT_ALG_MVEX;
     j->alg = alg;
     j->set = set;
+    if (t->c.framegen)
+        t->fg_ready[set] = 0;
     j->src[0] = left;
     j->src[1] = right;
     j->cameras = t->c.stereo ? 2 : 1;
@@ -450,6 +615,105 @@ void tk_build(struct tracker *t, int set, const uint8_t *left, const uint8_t *ri
     }
 }
 
+/* ---- generating a frame between two real ones ---- */
+
+void tk_fg_report(const struct tracker *t, const char *name, double cycles_per_us)
+{
+    if (!t->fg_runs)
+        return;
+    static const char *const stage[8] = {"more", "scene", "search", "filter", "upscale", "mid", "blend", "pyramid"};
+    fprintf(stderr, "%s: frame generation, %llu frames, us each:", name, (unsigned long long)t->fg_runs);
+    for (int i = 0; i < 8; i++)
+        fprintf(stderr, " %s %.1f", stage[i], (double)t->fg_cycles[i] / (double)t->fg_runs / cycles_per_us);
+    fprintf(stderr, "\n");
+}
+
+static void fg_build_more(struct tracker *t, int set)
+{
+    if (t->fg_ready[set])
+        return;
+    struct job *j = t->jp;
+    j->set = set;
+    for (int i = t->levels - 1; i < t->fg_levels; i++) {
+        run_build_op(t, OP_FG_MORE, i);
+        img_pad_tb(&t->fg_more[set][i]);
+    }
+    t->fg_ready[set] = 1;
+}
+
+int tk_generate(struct tracker *t, int set, const struct vt_msg *m, struct vt_msg *gm)
+{
+    if (!t->c.framegen || t->prev < 0 || t->prev == set || (t->state != VT_ST_NEW && t->state != VT_ST_OBSERVED) || t->nf == 0)
+        return -1;
+    const int p = t->prev, g = (set + 1) % t->nsets;
+    uint64_t mark = vt_tsc();
+#define FG_LAP(stage)                       \
+    do {                                    \
+        const uint64_t lap_now = vt_tsc();  \
+        t->fg_cycles[stage] += lap_now - mark; \
+        mark = lap_now;                     \
+    } while (0)
+    t->fg_runs++;
+    fg_build_more(t, p);
+    fg_build_more(t, set);
+    FG_LAP(0);
+    struct fg_job *f = &t->fg;
+    for (int i = 0; i < t->fg_levels; i++) {
+        f->a[i] = i + 1 < t->levels ? t->pyr[p][0].l[i + 1] : t->fg_more[p][i];
+        f->b[i] = i + 1 < t->levels ? t->pyr[set][0].l[i + 1] : t->fg_more[set][i];
+    }
+    f->a0 = t->pyr[p][0].l[0];
+    f->b0 = t->pyr[set][0].l[0];
+    f->out = t->pyr[g][0].l[0];
+    /* The older frame's histogram is last time's newer one, if there was a last time. */
+    if (t->fg_hist_set == p) {
+        uint32_t *s = f->hist_a;
+        f->hist_a = f->hist_b;
+        f->hist_b = s;
+    } else {
+        run_track_op(t, OP_FG_HIST_A, VT_ALG_MVEX);
+    }
+    run_track_op(t, OP_FG_HIST_B, VT_ALG_MVEX);
+    t->fg_hist_set = set;
+    f->scene_changed = fg_scene_verdict(f);
+    FG_LAP(1);
+    struct job *j = t->jt;
+    for (int L = t->fg_levels - 1; L >= 0; L--) {
+        j->level = L;
+        run_track_op(t, OP_FG_SEARCH, VT_ALG_MVEX);
+        FG_LAP(2);
+        run_track_op(t, OP_FG_FILTER, VT_ALG_MVEX);
+        FG_LAP(3);
+        if (L > 0)
+            run_track_op(t, OP_FG_UP, VT_ALG_MVEX);
+        FG_LAP(4);
+    }
+    run_track_op(t, OP_FG_MID, VT_ALG_MVEX);
+    FG_LAP(5);
+    run_track_op(t, OP_FG_BLEND, VT_ALG_MVEX);
+    FG_LAP(6);
+    run_track_op(t, OP_FG_PAD, VT_ALG_MVEX);
+    img_pad_tb(&f->out);
+    /* The rest of its pyramid, as any frame's. */
+    struct job *b = t->jp;
+    b->alg = VT_ALG_MVEX;
+    b->set = g;
+    b->cameras = 1;
+    for (int L = 1; L < t->levels; L++) {
+        run_build_op(t, OP_REDUCE, L);
+        img_pad_tb(&t->pyr[g][0].l[L]);
+    }
+    FG_LAP(7);
+#undef FG_LAP
+    *gm = *m;
+    gm->cmd = VT_CMD_NONE;
+    gm->sc_key = 0;
+    gm->dest = VT_PIPE_FLOW;
+    gm->generated = 1;
+    gm->acq_ns = t->last_acq_ns + (m->acq_ns - t->last_acq_ns) / 2u;
+    return g;
+}
+
 /* ---- a median that reorders its input: Hoare's selection ---- */
 
 static float select_kth(float *v, int n, int k)
@@ -483,8 +747,9 @@ static float select_kth(float *v, int n, int k)
 
 /* ---- the region ---- */
 
-static void store_appearance(struct tracker *t)
+static void store_appearance(struct tracker *t, int slot)
 {
+    struct app_slot *a = &t->app[slot];
     /* The coarsest level where the template still fits INSIDE the region: a template wider than the region would hold the background, which moves differently. */
     int L = 0;
     while (L < t->levels - 1 && R(t->rw) / R(1 << (L + 1)) >= R(APP_W) && R(t->rh) / R(1 << (L + 1)) >= R(APP_H))
@@ -501,7 +766,7 @@ static void store_appearance(struct tracker *t)
         const float *row = plane_row(pl, y0 + r) + x0;
         for (int k = 0; k < APP_W; k += VX_LANES) {
             const vxf v = vx_loadu(row + k);
-            vx_store(t->app + r * APP_W + k, v);
+            vx_store(a->pix + r * APP_W + k, v);
             sum = vx_add(sum, v);
         }
     }
@@ -510,15 +775,17 @@ static void store_appearance(struct tracker *t)
     vxf ss = vx_zero();
     for (int r = 0; r < APP_H; r++)
         for (int k = 0; k < APP_W; k += VX_LANES) {
-            const vxf z = vx_sub(vx_load(t->app + r * APP_W + k), vm);
-            vx_store(t->app + r * APP_W + k, z);
+            const vxf z = vx_sub(vx_load(a->pix + r * APP_W + k), vm);
+            vx_store(a->pix + r * APP_W + k, z);
             ss = vx_fma(z, z, ss);
         }
-    t->app_norm = vx_hsum(ss);
-    t->app_level = L;
-    t->app_fx = (float)(lx - R(ix));
-    t->app_fy = (float)(ly - R(iy));
-    t->have_app = 1;
+    a->norm = vx_hsum(ss);
+    a->level = L;
+    a->fx = (float)(lx - R(ix));
+    a->fy = (float)(ly - R(iy));
+    a->rw = t->rw;
+    a->rh = t->rh;
+    a->valid = 1;
 }
 
 /* Adds corners inside a part of the region at this frame, away from the features already held, each with its place in the rigid model. Of age PROBATION they are members at once. */
@@ -566,6 +833,8 @@ static void seed_part(struct tracker *t, real part, int age)
         t->fmu[k] = 0.0f;
         t->fmv[k] = 0.0f;
         t->fage[k] = (uint8_t)age;
+        t->fkx[k] = -1.0f;
+        t->fky[k] = -1.0f;
     }
 }
 
@@ -583,19 +852,38 @@ static void found_region(struct tracker *t)
     }
 }
 
+/* Out of patience: no position is claimed any more, but what it looks like is kept, and it can come back. */
+static void lose_region(struct tracker *t)
+{
+    t->state = VT_ST_LOST;
+    t->nf = 0;
+    t->kf.valid = 0;
+    t->split_run = 0;
+    t->hold = 0;
+    t->still_run = 0;
+    t->rate_u = t->rate_v = 0.0f;
+}
+
 static void end_region(struct tracker *t, uint32_t state)
 {
     t->state = state;
     t->nf = 0;
-    t->have_app = 0;
+    for (int i = 0; i < APP_SLOTS; i++)
+        t->app[i].valid = 0;
+    t->app_ticks = 0;
+    t->app_turn = 0;
+    t->cand_run = 0;
     t->kf.valid = 0;
     t->split_run = 0;
     t->want_app = 0;
     t->closed = 0;
     t->recentring = 0;
+    t->hold = 0;
+    t->still_run = 0;
     t->ra = 1.0f;
     t->rb = 0.0f;
     t->spread = 0.0f;
+    t->speed = 0.0f;
 }
 
 static void apply_command(struct tracker *t, const struct vt_msg *d, struct vt_result *o)
@@ -620,7 +908,7 @@ static void apply_command(struct tracker *t, const struct vt_msg *d, struct vt_r
             end_region(t, VT_ST_LOST);
         } else {
             t->last_obs_ns = d->acq_ns;
-            store_appearance(t);
+            store_appearance(t, 0);
         }
     }
 }
@@ -630,6 +918,8 @@ static inline void predict_position(struct tracker *t, real dt)
     if (dt > 0.0L) {
         t->cx = (float)(R(t->cx) + R(t->rate_u) * dt);
         t->cy = (float)(R(t->cy) + R(t->rate_v) * dt);
+        t->rate_u = (float)(R(t->rate_u) * COAST_DAMP);
+        t->rate_v = (float)(R(t->rate_v) * COAST_DAMP);
     }
 }
 
@@ -827,7 +1117,12 @@ static void region_from_flow(struct tracker *t, const struct vt_msg *d, real dt,
             }
     if (members >= min_f) {
         const real a0 = R(t->ra), b0 = R(t->rb), cx0 = R(t->cx), cy0 = R(t->cy), half_w = 0.5L * R(t->rw), half_h = 0.5L * R(t->rh);
-        const real spread3 = 3.0L * R(t->spread), tol = spread3 > RIGID_TOL ? spread3 : RIGID_TOL;
+        /* Two questions, two tolerances. Who places the centre: the rigid core, within the fixed tolerance or three times its spread. Who stays a member: real things are not rigid, and how far their parts disagree grows with
+         * how fast they go. A fixed 1.25 px threw out nearly everything on a thing moving several pixels a frame (live, members down to 8); but one wide tolerance for both let features straddling an outline, moving at 82 %
+         * of the object's speed, vote, and moved the centre 2.5 px (scene bigbox). A background the region is moving across still parts from it, by a whole frame's motion each frame. */
+        const real by_spread = 3.0L * R(t->spread), tol = by_spread > RIGID_TOL ? by_spread : RIGID_TOL;
+        const real by_speed = TOL_SPEED * R(t->speed), cap = R(t->w) * TOL_CAP_OF_WIDTH, capped = by_speed < cap ? by_speed : cap, keep_tol = capped > tol ? capped : tol;
+        const real leak_up = ANCHOR_LEAK + ANCHOR_LEAK_SPEED * R(t->speed), leak = leak_up < ANCHOR_LEAK_MOVING ? leak_up : ANCHOR_LEAK_MOVING;
         memset(zx, 0, sizeof zx);
         memset(zy, 0, sizeof zy);
         memset(wt, 0, sizeof wt);
@@ -891,9 +1186,8 @@ static void region_from_flow(struct tracker *t, const struct vt_msg *d, real dt,
         }
         /* A second thing near the centre of a box whose majority is still stays on trial instead of being thrown out the frame it parts: its members have not yet moved far enough to say they move. */
         const int p_moves = fabsl(median_where(mu, in_p, n, scratch)) + fabsl(median_where(mv, in_p, n, scratch)) > 2.0L * tol;
-        int second_thing = 0, q_trial = 0, q_moves = 0;
+        int q_trial = 0, q_moves = 0;
         if (second >= SECOND_SHARE * total && nq >= min_f) {
-            second_thing = 1;
             q_moves = fabsl(median_where(mu, in_q, n, scratch)) + fabsl(median_where(mv, in_q, n, scratch)) > 2.0L * tol;
             q_trial = !p_moves && fabsl(median_where(nx, in_q, n, scratch) - cx0) <= 0.5L * half_w && fabsl(median_where(ny, in_q, n, scratch) - cy0) <= 0.5L * half_h;
         }
@@ -913,11 +1207,73 @@ static void region_from_flow(struct tracker *t, const struct vt_msg *d, real dt,
         if (nfit)
             fit_region(nx, ny, ax, ay, fit, n, a0, b0, &s);
         const real inv = 1.0L / (s.a * s.a + s.b * s.b);
+        /* A generated frame moves features and the region and decides nothing: its pixels are invented, and an error in them must not cost a member its place. A feature the flow lost on it goes where the model says. If
+         * too little agrees the whole frame is passed over, and the next real frame tracks from the last real one. */
+        if (d->generated) {
+            int agree = 0;
+            real gu = 0.0L, gv = 0.0L;
+            for (int k = 0; k < n; k++) {
+                real ex, ey;
+                if (member[k] && !(on_trial && !in_p[k]) && off_model(&s, R(nx[k]), R(ny[k]), R(ax[k]), R(ay[k]), &ex, &ey) <= keep_tol) {
+                    agree++;
+                    gu += R(nx[k]) - R(t->fx[idx[k]]);
+                    gv += R(ny[k]) - R(t->fy[idx[k]]);
+                }
+            }
+            int nkeep = 0;
+            for (int k = 0; k < n; k++)
+                nkeep += in_p[k];
+            const int asked_g = woke ? nq : on_trial ? members_in - (members - nkeep) : members_in;
+            const real share_g = asked_g > 0 ? R(agree) / R(asked_g) : 0.0L;
+            o->inliers = (float)(share_g < 1.0L ? share_g : 1.0L);
+            if (agree < min_f || o->inliers < t->c.min_inliers) {
+                t->gen_skip = 1;
+                return;
+            }
+            int k = 0;
+            for (int i = 0; i < t->nf; i++) {
+                if (t->flow[i].status) {
+                    const real A = R(t->fax[i]), B = R(t->fay[i]), nxm = s.cx + s.a * A - s.b * B, nym = s.cy + s.b * A + s.a * B;
+                    t->fu[i] = (float)(nxm - R(t->fx[i]));
+                    t->fv[i] = (float)(nym - R(t->fy[i]));
+                    t->fx[i] = (float)nxm;
+                    t->fy[i] = (float)nym;
+                } else {
+                    t->fu[i] = (float)(R(nx[k]) - R(t->fx[i]));
+                    t->fv[i] = (float)(R(ny[k]) - R(t->fy[i]));
+                    t->fx[i] = nx[k];
+                    t->fy[i] = ny[k];
+                    t->fmu[i] = mu[k];
+                    t->fmv[i] = mv[k];
+                    k++;
+                }
+                t->fflag[i] &= ~(uint32_t)VT_FF_NEW;
+            }
+            const real scale_g = sqrtl((s.a * s.a + s.b * s.b) / (a0 * a0 + b0 * b0)), cu_g = gu / R(agree), cv_g = gv / R(agree);
+            t->ra = (float)s.a;
+            t->rb = (float)s.b;
+            t->cx = (float)s.cx;
+            t->cy = (float)s.cy;
+            t->rw = (float)(R(t->rw) * scale_g);
+            t->rh = (float)(R(t->rh) * scale_g);
+            t->gw = (float)(R(t->gw) * scale_g);
+            t->gh = (float)(R(t->gh) * scale_g);
+            t->speed = (float)(0.5L * R(t->speed) + 0.5L * (fabsl(cu_g) + fabsl(cv_g)));
+            o->scale = (float)(scale_g - 1.0L);
+            if (dt > 0.0L) {
+                t->rate_u = (float)(cu_g / dt);
+                t->rate_v = (float)(cv_g / dt);
+            }
+            o->du = (float)cu_g;
+            o->dv = (float)cv_g;
+            t->state = VT_ST_OBSERVED;
+            return;
+        }
         /* A rider's last step to membership wants proof: a closed region standing still cannot tell what moves with it from what does not, and would take in the background around it. */
         const real ru = fabsl(s.cx - cx0) + fabsl(s.cy - cy0);
         const int proving = !t->closed || ru >= GROW_MOTION;
         /* Keep those it explains, and a second motion still on trial, which does not move the region. The tables shrink in place: k never gets ahead of the index it reads. */
-        int w = 0, kept = 0, nd = 0, riders_gone = 0;
+        int w = 0, kept = 0, nd = 0;
         real su = 0.0L, sv = 0.0L;
         for (int k = 0; k < n; k++) {
             const int i = idx[k];
@@ -925,11 +1281,9 @@ static void region_from_flow(struct tracker *t, const struct vt_msg *d, real dt,
             real ex, ey;
             const real A = R(ax[k]), B = R(ay[k]), off = off_model(&s, R(nx[k]), R(ny[k]), A, B, &ex, &ey);
             /* While a motion is on trial no member is thrown out for differing from the majority: a thing that turns as it moves shows several motions at once until a model of its own explains them all. */
-            const int near = off <= tol, trial = on_trial && member[k] && !in_p[k];
-            if (!near && !trial) {
-                riders_gone += !member[k];
+            const int near = off <= keep_tol, trial = on_trial && member[k] && !in_p[k];
+            if (!near && !trial)
                 continue;
-            }
             const int agrees = member[k] && near && !trial;
             const real u = R(f->x) - R(t->fx[i]), v = R(f->y) - R(t->fy[i]), var = R(f->cov_xx) + R(f->cov_yy);
             const uint8_t age = t->fage[i];
@@ -937,7 +1291,8 @@ static void region_from_flow(struct tracker *t, const struct vt_msg *d, real dt,
                 kept++;
                 su += u;
                 sv += v;
-                scratch[nd++] = (float)off;
+                if (off <= tol)
+                    scratch[nd++] = (float)off;
             }
             t->fx[w] = f->x;
             t->fy[w] = f->y;
@@ -946,11 +1301,15 @@ static void region_from_flow(struct tracker *t, const struct vt_msg *d, real dt,
             t->fsigma[w] = (float)sqrtl(var > 0.0L ? var : 0.0L);
             t->fdisp[w] = t->fdisp[i];
             t->fflag[w] = t->fflag[i] & ~(uint32_t)VT_FF_NEW;
-            t->fax[w] = (float)(agrees ? A + ANCHOR_LEAK * inv * (s.a * ex + s.b * ey) : A);
-            t->fay[w] = (float)(agrees ? B + ANCHOR_LEAK * inv * (s.a * ey - s.b * ex) : B);
+            /* The core that places the centre gives way slowly; what is only being kept, faster, so that a part of a changing shape can come back. */
+            const real give = off <= tol ? ANCHOR_LEAK : leak;
+            t->fax[w] = (float)(agrees ? A + give * inv * (s.a * ex + s.b * ey) : A);
+            t->fay[w] = (float)(agrees ? B + give * inv * (s.a * ey - s.b * ex) : B);
             t->fmu[w] = mu[k];
             t->fmv[w] = mv[k];
             t->fage[w] = member[k] && age < PROBATION ? PROBATION : (age < PROBATION - 1 || proving) && age < 255 ? (uint8_t)(age + 1) : age;
+            t->fkx[w] = t->fkx[i];
+            t->fky[w] = t->fky[i];
             w++;
         }
         /* How much of what was asked agrees. On waking the rest of the box has just been let go; while a motion is on trial it is not asked. */
@@ -964,7 +1323,8 @@ static void region_from_flow(struct tracker *t, const struct vt_msg *d, real dt,
         if (kept >= min_f && ratio >= t->c.min_inliers) {
             const real scale = sqrtl((s.a * s.a + s.b * s.b) / (a0 * a0 + b0 * b0)), cu = su / R(kept), cv = sv / R(kept);
             t->nf = w;
-            t->spread = (float)(SPREAD_MEMORY * R(t->spread) + (1.0L - SPREAD_MEMORY) * R(select_median(scratch, nd)));
+            if (nd)
+                t->spread = (float)(SPREAD_MEMORY * R(t->spread) + (1.0L - SPREAD_MEMORY) * R(select_median(scratch, nd)));
             t->ra = (float)s.a;
             t->rb = (float)s.b;
             t->cx = (float)s.cx;
@@ -975,12 +1335,14 @@ static void region_from_flow(struct tracker *t, const struct vt_msg *d, real dt,
             t->gh = (float)(R(t->gh) * scale);
             if (woke)
                 t->split_run = 0;
-            /* Evidence that the box holds more than the region: a member group parted from a moving majority, or riders thrown out by a moving region. The founders may all have been on the thing, and then only the
-             * riders can say so. */
-            if (woke || (p_moves && !on_trial && (second_thing || riders_gone >= min_f)))
+            /* A region that moves is what still moves with it: its box closes on its members, once. Waiting for a sign of what left failed: 51 of 128 features died in the flow as an object set off, 7 parted, none was
+             * riding, and the box and its picture of the background stayed (scene comeback). */
+            if (woke || (p_moves && !on_trial && !t->closed))
                 close_box(t, woke);
             else if (t->closed)
                 follow_members(t);
+            t->still_run = fabsl(cu) + fabsl(cv) < HOLD_STILL ? t->still_run + 1 : 0;
+            t->speed = (float)(0.5L * R(t->speed) + 0.5L * (fabsl(cu) + fabsl(cv)));
             o->scale = (float)(scale - 1.0L);
             if (dt > 0.0L) {
                 t->rate_u = (float)(cu / dt);
@@ -994,6 +1356,10 @@ static void region_from_flow(struct tracker *t, const struct vt_msg *d, real dt,
             return;
         }
     }
+    if (d->generated) {
+        t->gen_skip = 1;
+        return;
+    }
     /* Not observed: no motion is reported for this frame. The features are not trusted any more; the position shown is a prediction. */
     t->nf = 0;
     t->state = VT_ST_UNOBSERVED;
@@ -1001,62 +1367,224 @@ static void region_from_flow(struct tracker *t, const struct vt_msg *d, real dt,
     predict_position(t, dt);
 }
 
-/* One axis of a parabola through three correlations: the peak's offset, within half a step. */
-static real peak_offset(real l, real c, real r)
-{
-    const real den = l - 2.0L * c + r;
-    if (den >= 0.0L)
-        return 0.0L;
-    const real o = 0.5L * (l - r) / den;
-    return o < -0.5L ? -0.5L : o > 0.5L ? 0.5L : o;
-}
+/* What a search of one remembered appearance found. */
+struct found {
+    int slot, hx, hy; /* the template's corner, in half pixels of its level */
+    real ncc, second;
+};
 
-/* Looks for the stored appearance around the prediction. */
-static int try_reacquire(struct tracker *t, int alg, struct vt_result *o)
+/* The correlation at a corner in half pixels of the level. A half step averages the two neighbours, a two-tap filter: on fine texture a whole-pixel search at a coarse level can miss a true place by half a pixel and read 0.5
+ * where the thing is exactly there. */
+static real search_half(const struct vt_plane *pl, const struct app_slot *a, int hx, int hy)
 {
-    if (!t->have_app)
-        return 0;
-    struct job *j = t->jt;
-    const real s = 1.0L / R(1 << t->app_level);
-    j->xc = (int)(R(t->cx) * s - R(t->app_fx)) - APP_W / 2;
-    j->yc = (int)(R(t->cy) * s - R(t->app_fy)) - APP_H / 2;
-    /* As far in the picture whatever the level: the same number of pixels of a coarse level reached 288 px at 1/8 scale, and a lookalike 160 px away took the region (live, 2026-11-03). */
-    const int reach = (int)t->c.reacq_radius + (int)t->missing < 3 * (int)t->c.reacq_radius ? (int)t->c.reacq_radius + (int)t->missing : 3 * (int)t->c.reacq_radius;
-    j->radius = (reach >> t->app_level) < REACQ_MIN_STEPS ? REACQ_MIN_STEPS : reach >> t->app_level;
-    for (int i = 0; i < t->threads_track; i++)
-        j->partial[i * 16] = -2.0f;
-    run_track_op(t, OP_SEARCH, alg);
-    float best = -2.0f, fbx = 0.0f, fby = 0.0f;
-    for (int i = 0; i < t->threads_track; i++) {
-        const float *p = &j->partial[i * 16];
-        if (p[0] > best || (p[0] == best && best > -2.0f && (p[2] < fby || (p[2] == fby && p[1] < fbx)))) {
-            best = p[0];
-            fbx = p[1];
-            fby = p[2];
+    static const float HALF VX_ALIGNED = 0.5f;
+    const int x = hx >> 1, y = hy >> 1, ox = hx & 1, oy = hy & 1;
+    if (x < 1 || y < 1 || x + APP_W + 1 >= pl->w - 1 || y + APP_H + 1 >= pl->h - 1)
+        return -1.0L;
+    const vxf half = vx_bcast(&HALF);
+    vxf st = vx_zero(), sj = vx_zero(), sjj = vx_zero();
+    for (int r = 0; r < APP_H; r++) {
+        const float *row = plane_row(pl, y + r) + x, *below = plane_row(pl, y + r + 1) + x;
+        for (int k = 0; k < APP_W; k += VX_LANES) {
+            vxf v = vx_loadu(row + k);
+            if (ox)
+                v = vx_mul(vx_add(v, vx_loadu(row + k + 1)), half);
+            if (oy) {
+                vxf w = vx_loadu(below + k);
+                if (ox)
+                    w = vx_mul(vx_add(w, vx_loadu(below + k + 1)), half);
+                v = vx_mul(vx_add(v, w), half);
+            }
+            st = vx_fma(v, vx_load(a->pix + r * APP_W + k), st);
+            sj = vx_add(sj, v);
+            sjj = vx_fma(v, v, sjj);
         }
     }
-    const int bx = (int)fbx, by = (int)fby;
-    const struct vt_plane *pl = &t->pyr[t->cur][0].l[t->app_level];
-    const real norm = R(t->app_norm), c0 = R(best);
-    const real ox = peak_offset(search_at(pl, t->app, norm, bx - 1, by), c0, search_at(pl, t->app, norm, bx + 1, by));
-    const real oy = peak_offset(search_at(pl, t->app, norm, bx, by - 1), c0, search_at(pl, t->app, norm, bx, by + 1));
-    const real scale = R(1 << t->app_level);
+    const real n = R(APP_W * APP_H), norm = R(a->norm);
+    const real sa = R(vx_hsum(st)), sb = R(vx_hsum(sj)), sc = R(vx_hsum(sjj));
+    const real var = sc - sb * sb / n;
+    return (var <= 0.0L || norm <= 0.0L) ? 0.0L : sa / sqrtl(norm * var);
+}
+
+/* The best place for a remembered appearance in a window of template corners, and the best place clear of it: a thing's peak stands alone, a repeating pattern's or a blank wall's does not. The top cells of the map are
+ * looked at again in half pixels before anything is judged. */
+static void search_slot(struct tracker *t, int slot, int x0, int x1, int y0, int y1, int step, int alg, struct found *f)
+{
+    const struct app_slot *a = &t->app[slot];
+    const struct vt_plane *pl = &t->pyr[t->cur][0].l[a->level];
+    const int lo_x = 1, hi_x = pl->w - APP_W - 2, lo_y = 1, hi_y = pl->h - APP_H - 2;
+    x0 = x0 < lo_x ? lo_x : x0;
+    x1 = x1 > hi_x ? hi_x : x1;
+    y0 = y0 < lo_y ? lo_y : y0;
+    y1 = y1 > hi_y ? hi_y : y1;
+    f->slot = slot;
+    f->ncc = -2.0L;
+    f->second = -2.0L;
+    f->hx = f->hy = 0;
+    if (x1 < x0 || y1 < y0)
+        return;
+    struct job *j = t->jt;
+    j->slot = slot;
+    j->x0 = x0;
+    j->x1 = x1;
+    j->y0 = y0;
+    j->y1 = y1;
+    j->step = step;
+    j->cell_cols = (x1 - x0) / SEARCH_CELL + 1;
+    j->cell_rows = (y1 - y0) / SEARCH_CELL + 1;
+    run_track_op(t, OP_SEARCH, alg);
+    const int cells = j->cell_cols * j->cell_rows;
+    int top[SEARCH_TOP], ntop = 0;
+    for (int i = 0; i < cells; i++) {
+        if (t->sc_v[i] <= -2.0f || (ntop == SEARCH_TOP && t->sc_v[i] <= t->sc_v[top[ntop - 1]]))
+            continue;
+        int at = ntop < SEARCH_TOP ? ntop++ : SEARCH_TOP - 1;
+        for (; at > 0 && t->sc_v[top[at - 1]] < t->sc_v[i]; at--)
+            top[at] = top[at - 1];
+        top[at] = i;
+    }
+    /* Around each, to half a pixel: a coarse pass may be a step away from its peak. */
+    const int around = step > 1 ? 2 * step - 1 : 1;
+    real score[SEARCH_TOP];
+    int shx[SEARCH_TOP], shy[SEARCH_TOP];
+    for (int c = 0; c < ntop; c++) {
+        const int cx = 2 * t->sc_x[top[c]], cy = 2 * t->sc_y[top[c]];
+        score[c] = -2.0L;
+        shx[c] = cx;
+        shy[c] = cy;
+        for (int hy = cy - around; hy <= cy + around; hy++)
+            for (int hx = cx - around; hx <= cx + around; hx++) {
+                const real v = search_half(pl, a, hx, hy);
+                if (v > score[c]) {
+                    score[c] = v;
+                    shx[c] = hx;
+                    shy[c] = hy;
+                }
+            }
+        if (score[c] > f->ncc) {
+            f->ncc = score[c];
+            f->hx = shx[c];
+            f->hy = shy[c];
+        }
+    }
+    for (int c = 0; c < ntop; c++) {
+        const int dx = shx[c] - f->hx, dy = shy[c] - f->hy;
+        /* In half pixels: clear of the peak by half a template. */
+        if ((dx * dx > APP_W * APP_W || dy * dy > APP_H * APP_H) && score[c] > f->second)
+            f->second = score[c];
+    }
+}
+
+/* In a remembered appearance's own level, the corner its template would have with the region's centre at (x, y). */
+static inline void corner_for(const struct app_slot *a, real x, real y, int *cx, int *cy)
+{
+    const real s = 1.0L / R(1 << a->level);
+    *cx = (int)(x * s - R(a->fx)) - APP_W / 2;
+    *cy = (int)(y * s - R(a->fy)) - APP_H / 2;
+}
+
+/* Takes the region back where a search found it. False if too little there can be tracked. */
+static int take_back(struct tracker *t, const struct found *f, struct vt_result *o)
+{
+    const struct app_slot *a = &t->app[f->slot];
+    const real scale = R(1 << a->level);
     /* The template's corner is its centre less these whole pixels, the same whole division store_appearance used. */
     const int half_w = APP_W / 2, half_h = APP_H / 2;
-    o->reacq_ncc = best;
-    o->reacq_x = (float)((R(bx) + ox + R(half_w) + R(t->app_fx)) * scale);
-    o->reacq_y = (float)((R(by) + oy + R(half_h) + R(t->app_fy)) * scale);
-    if (best < t->c.reacq_ncc)
-        return 0;
+    o->reacq_x = (float)((0.5L * R(f->hx) + R(half_w) + R(a->fx)) * scale);
+    o->reacq_y = (float)((0.5L * R(f->hy) + R(half_h) + R(a->fy)) * scale);
+    const float was_cx = t->cx, was_cy = t->cy, was_w = t->rw, was_h = t->rh;
     t->cx = o->reacq_x;
     t->cy = o->reacq_y;
+    t->rw = a->rw;
+    t->rh = a->rh;
+    t->ra = 1.0f;
+    t->rb = 0.0f;
+    t->spread = 0.0f;
+    t->speed = 0.0f;
+    t->rate_u = t->rate_v = 0.0f;
+    t->hold = 0;
+    t->still_run = 0;
     found_region(t);
     if (t->nf < (int)t->c.min_features) {
         t->nf = 0;
+        t->cx = was_cx;
+        t->cy = was_cy;
+        t->rw = was_w;
+        t->rh = was_h;
         return 0;
     }
     o->flags |= VT_F_REACQUIRED;
+    t->cand_run = 0;
     return 1;
+}
+
+/* Looks for a region out of its flow, by what it has looked like. While it can still be predicted, every memory around the prediction, believed at the configured correlation. Otherwise, or if that fails for a while, the
+ * whole picture, one memory a frame, believed only on more: a higher correlation, a peak standing clear of any other, and the same place again on the next frame. There is no giving up: only the operator ends a region. */
+static int try_reacquire(struct tracker *t, int alg, struct vt_result *o)
+{
+    int any = 0;
+    for (int i = 0; i < APP_SLOTS; i++)
+        any |= t->app[i].valid;
+    if (!any)
+        return 0;
+    struct found f;
+    real shown = -2.0L;
+    const int predicting = t->state == VT_ST_UNOBSERVED;
+    /* What was seen far away last frame: is it still there? */
+    if (t->cand_run) {
+        const struct app_slot *a = &t->app[t->cand_slot];
+        int cx, cy;
+        corner_for(a, R(t->cand_x), R(t->cand_y), &cx, &cy);
+        const int r = REACQ_AGAIN_PX >> a->level;
+        const int rr = r < REACQ_MIN_STEPS ? REACQ_MIN_STEPS : r;
+        search_slot(t, t->cand_slot, cx - rr, cx + rr, cy - rr, cy + rr, 1, alg, &f);
+        o->reacq_ncc = (float)f.ncc;
+        if (f.ncc >= REACQ_FAR_NCC && take_back(t, &f, o))
+            return 1;
+        t->cand_run = 0;
+    }
+    if (predicting) {
+        /* As far in the picture whatever the level: the same number of pixels of a coarse level reached 288 px at 1/8 scale, and a lookalike 160 px away took the region (live, 2026-11-03). */
+        const int reach = (int)t->c.reacq_radius + (int)t->missing < 3 * (int)t->c.reacq_radius ? (int)t->c.reacq_radius + (int)t->missing : 3 * (int)t->c.reacq_radius;
+        struct found near = {.ncc = -2.0L, .second = -2.0L};
+        for (int i = 0; i < APP_SLOTS; i++) {
+            const struct app_slot *a = &t->app[i];
+            if (!a->valid)
+                continue;
+            int cx, cy;
+            corner_for(a, R(t->cx), R(t->cy), &cx, &cy);
+            const int r = (reach >> a->level) < REACQ_MIN_STEPS ? REACQ_MIN_STEPS : reach >> a->level;
+            search_slot(t, i, cx - r, cx + r, cy - r, cy + r, 1, alg, &f);
+            if (f.ncc > near.ncc)
+                near = f;
+        }
+        shown = near.ncc;
+        o->reacq_ncc = (float)shown;
+        if (near.ncc >= R(t->c.reacq_ncc) && take_back(t, &near, o))
+            return 1;
+        if (t->missing < REACQ_FAR_AFTER)
+            return 0;
+    }
+    /* The whole picture, with the next memory in turn. */
+    int slot = t->app_turn;
+    for (int i = 0; i < APP_SLOTS; i++, slot = (slot + 1) % APP_SLOTS)
+        if (t->app[slot].valid)
+            break;
+    t->app_turn = (slot + 1) % APP_SLOTS;
+    const struct app_slot *a = &t->app[slot];
+    const struct vt_plane *pl = &t->pyr[t->cur][0].l[a->level];
+    search_slot(t, slot, 1, pl->w, 1, pl->h, a->level <= 1 ? 2 : 1, alg, &f);
+    if (f.ncc > shown)
+        o->reacq_ncc = (float)f.ncc;
+    if (f.ncc >= REACQ_FAR_NCC && f.ncc - f.second >= REACQ_FAR_CLEAR) {
+        const real sc = R(1 << a->level);
+        const int half_w = APP_W / 2, half_h = APP_H / 2;
+        t->cand_slot = slot;
+        t->cand_x = (float)((0.5L * R(f.hx) + R(half_w) + R(a->fx)) * sc);
+        t->cand_y = (float)((0.5L * R(f.hy) + R(half_h) + R(a->fy)) * sc);
+        t->cand_run = 1;
+    }
+    return 0;
 }
 
 /* ---- stereo ---- */
@@ -1243,8 +1771,16 @@ void tk_track(struct tracker *t, int set, const struct vt_msg *d, struct vt_resu
         o->motion = (float)(sum / (R(t->w & ~15) * R(t->h)) / R(VT_Q6));
     }
 
+    const int gen = d->generated != 0;
+    t->gen_skip = 0;
+    if (gen)
+        o->flags |= VT_F_GENERATED;
     const real dt = t->last_acq_ns ? R(d->acq_ns - t->last_acq_ns) * 1e-9L : 0.0L;
+    /* The filter runs on real frames only, and its clock is theirs. */
+    const real dt_est = t->last_est_ns ? R(d->acq_ns - t->last_est_ns) * 1e-9L : 0.0L;
     t->last_acq_ns = d->acq_ns;
+    if (want_est)
+        t->last_est_ns = d->acq_ns;
 
     /* The flow, for a region that exists and held features last frame. */
     const int active = t->state == VT_ST_NEW || t->state == VT_ST_OBSERVED;
@@ -1257,34 +1793,58 @@ void tk_track(struct tracker *t, int set, const struct vt_msg *d, struct vt_resu
     if (do_flow) {
         region_from_flow(t, d, dt, o);
     } else if (t->state == VT_ST_UNOBSERVED) {
-        t->missing++;
+        t->missing += !gen;
         predict_position(t, dt);
     }
     if (d->cmd != VT_CMD_NONE)
         apply_command(t, d, o);
-    /* A region that left its flow: take it back from its appearance, or count it out. */
-    if (t->state == VT_ST_UNOBSERVED) {
+    /* A region that left its flow: take it back from its appearance. Past its patience no position is claimed any more, and the search goes on over the whole picture until the operator says otherwise. */
+    if ((t->state == VT_ST_UNOBSERVED || t->state == VT_ST_LOST) && !gen) {
         if (try_reacquire(t, alg, o)) {
             t->state = VT_ST_OBSERVED;
             t->missing = 0;
             t->last_obs_ns = d->acq_ns;
-        } else if (t->missing > t->c.max_missing) {
-            end_region(t, VT_ST_LOST);
+        } else if (t->state == VT_ST_UNOBSERVED && t->missing > t->c.max_missing) {
+            lose_region(t);
         }
     }
-    if (t->state == VT_ST_OBSERVED && !(o->flags & VT_F_REACQUIRED)) {
+    if (t->state == VT_ST_OBSERVED && !(o->flags & VT_F_REACQUIRED) && !gen) {
         /* Replace features as they die, but not every frame: a region with few corners stays below the line for good, and detection cost 7.2 ms a frame on real video
          * (camcorder, 275 x 320 region, 2026-11-02). Every 16th frame, or at once when the region is close to being unobservable. Refresh the appearance only from a clean frame. */
-        int held = 0;
+        int held = 0, in_key = 0;
         for (int i = 0; i < t->nf; i++)
-            held += t->fage[i] >= PROBATION;
+            if (t->fage[i] >= PROBATION) {
+                held++;
+                in_key += t->hold && t->fkx[i] >= 0.0f;
+            }
+        /* A region standing still, with no frame held or too few members in it, holds this one. */
+        if (t->still_run >= HOLD_AFTER && 2 * in_key < held) {
+            run_track_op(t, OP_KEY_COPY, alg);
+            for (int i = 0; i < t->nf; i++) {
+                const int m = t->fage[i] >= PROBATION;
+                t->fkx[i] = m ? t->fx[i] : -1.0f;
+                t->fky[i] = m ? t->fy[i] : -1.0f;
+            }
+            t->hold = 1;
+        }
         /* Counting members, not riders, and not every frame: riders on a background are all thrown out the frame after they arrive when the region moves, and the count alternated 13, 126, 15, 128 with a detection every
          * second frame (live, 433 x 537 box, 2026-11-03). */
         if ((held < (int)t->c.min_features * 2 && (d->instance % 4u) == 0u) || (t->nf < (int)t->c.max_features / 2 && (d->instance % 16u) == 8u))
             seed_part(t, 1.0L, 0);
-        if (t->want_app || (o->inliers > 0.9f && (d->instance % 16u) == 0u)) {
-            store_appearance(t);
+        /* What it looks like, at several ages: the first since the box last closed, which is never replaced, and about half a second, two and eight seconds ago. A thing that comes back after a while may look like any of them. */
+        if (t->want_app) {
+            for (int i = 0; i < APP_SLOTS; i++)
+                t->app[i].valid = 0;
+            store_appearance(t, 0);
             t->want_app = 0;
+            t->app_ticks = 0;
+        } else if (o->inliers > 0.9f && (d->instance % 16u) == 0u) {
+            t->app_ticks++;
+            store_appearance(t, 1);
+            if ((t->app_ticks & 3u) == 0u)
+                store_appearance(t, 2);
+            if ((t->app_ticks & 15u) == 0u)
+                store_appearance(t, 3);
         }
     }
     const uint64_t t2 = vt_tsc();
@@ -1307,8 +1867,8 @@ void tk_track(struct tracker *t, int set, const struct vt_msg *d, struct vt_resu
     if (t->state == VT_ST_LOST || t->state == VT_ST_DESELECTED || t->state == VT_ST_NONE)
         t->kf.valid = 0;
     if (want_est) {
-        if (t->kf.valid && dt > 0.0L)
-            kf_predict(&t->kf, dt, R(t->c.q_accel));
+        if (t->kf.valid && dt_est > 0.0L)
+            kf_predict(&t->kf, dt_est, R(t->c.q_accel));
         if (n3 > 0) {
             for (int i = 0; i < 3; i++)
                 o->meas[i] = (double)z[i];
@@ -1337,7 +1897,7 @@ void tk_track(struct tracker *t, int set, const struct vt_msg *d, struct vt_resu
         if (t->kf.valid) {
             const real age = R(d->acq_ns - t->last_meas_ns) * 1e-9L;
             o->age_s = (double)age;
-            const real patience = dt > 0.0L ? dt * R(t->c.max_missing) : 1.0L;
+            const real patience = dt_est > 0.0L ? dt_est * R(t->c.max_missing) : 1.0L;
             if (age > patience + 1e-9L) {
                 t->kf.valid = 0;
             } else {
@@ -1405,6 +1965,7 @@ void tk_track(struct tracker *t, int set, const struct vt_msg *d, struct vt_resu
         o->debug_h = (uint32_t)pl->h;
         o->debug_stride = (uint32_t)pl->stride;
     }
-    t->prev = set;
+    if (!t->gen_skip)
+        t->prev = set;
     o->cycles[VT_T_TRACK] = vt_tsc() - t0;
 }

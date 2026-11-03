@@ -46,6 +46,7 @@ int run_opts_parse(struct run_opts *o, int argc, char **argv, struct dataset *ds
             c->width2 = (uint32_t)o->w;
             c->height2 = (uint32_t)o->h;
         }
+        else if (!strcmp(argv[i], "--framegen")) c->framegen = 1;
         else if (OPT("--cores")) c->cores = (uint32_t)atoi(argv[++i]);
         else if (OPT("--tpc")) c->tpc = (uint32_t)atoi(argv[++i]);
         else if (OPT("--pipes")) c->pipelines = (uint32_t)atoi(argv[++i]);

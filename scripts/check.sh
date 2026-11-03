@@ -70,6 +70,13 @@ scripts/vtrackd.sh start 512 >/dev/null
 for n in translate shapes camera brightness noise occlusion loss leave helix linear3d glitch repeat flat bigbox smallbox stillstart rotate swing hold; do
     if scripts/scene.sh "$n" 640x480 --gate >"$s/scene" 2>&1; then pass "scene $n: tolerances and replay"; else fail "scene $n"; /usr/bin/grep -aE 'GATE MISS|DIFFERS' "$s/scene" | head -6; fi
 done
+if scripts/scene.sh comeback 640x480 --frames 240 --gate >"$s/scene" 2>&1; then pass "scene comeback, past any patience and back: tolerances and replay"; else fail "scene comeback"; /usr/bin/grep -aE 'GATE MISS|DIFFERS' "$s/scene" | head -6; fi
+# Generated frames between the real ones: the same tolerances on the real frames, card = host on every result.
+for n in translate occlusion loss bigbox smallbox stillstart rotate swing hold; do
+    if scripts/scene.sh "$n" 640x480 --gate --framegen >"$s/scene" 2>&1; then pass "scene $n with generated frames: tolerances and replay"; else fail "scene $n with generated frames"; /usr/bin/grep -aE 'GATE MISS|DIFFERS' "$s/scene" | head -6; fi
+done
+if scripts/scene.sh comeback 640x480 --frames 240 --gate --framegen >"$s/scene" 2>&1; then pass "scene comeback with generated frames: tolerances and replay"; else fail "scene comeback with generated frames"; /usr/bin/grep -aE 'GATE MISS|DIFFERS' "$s/scene" | head -6; fi
+if scripts/scene.sh dual 640x480 --dual --gate --framegen >"$s/scene" 2>&1; then pass "scene dual with generated frames: tolerances and replay"; else fail "scene dual with generated frames"; /usr/bin/grep -aE 'GATE|replay' "$s/scene" | head -6; fi
 if scripts/scene.sh dual 640x480 --dual --gate >"$s/scene" 2>&1; then pass "scene dual, two independently tracked views: tolerances and replay"; else fail "scene dual"; /usr/bin/grep -aE 'GATE|replay' "$s/scene" | head -6; fi
 if scripts/scene.sh translate 640x480 --mono --gate >"$s/scene" 2>&1; then pass "scene translate, mode A: tolerances and replay"; else fail "scene translate, mode A"; /usr/bin/grep -aE 'GATE MISS|DIFFERS' "$s/scene" | head -6; fi
 if /usr/bin/grep -aq '"metric_frames":0,' "$s/scene"; then pass "mode A reports no metric output"; else fail "mode A reported metric output"; fi

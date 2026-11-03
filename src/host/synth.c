@@ -6,7 +6,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-static const char *const names[SC_COUNT] = {"translate", "shapes", "camera", "brightness", "noise", "occlusion", "loss", "leave", "helix", "linear3d", "repeat", "flat", "glitch", "bigbox", "hold", "smallbox", "stillstart", "rotate", "swing", "dual"};
+static const char *const names[SC_COUNT] = {"translate", "shapes", "camera", "brightness", "noise", "occlusion", "loss", "leave", "helix", "linear3d", "repeat", "flat", "glitch", "bigbox", "hold", "smallbox", "stillstart", "rotate", "swing", "comeback", "dual"};
 
 const char *scene_name(enum scene_id id) { return names[id]; }
 
@@ -71,7 +71,7 @@ static inline void unturn(const struct motion *m, double *lx, double *ly)
 }
 
 /* The background as busy as the object, so that features on it are as good as features on the object. */
-static inline int busy_background(const struct scene *s) { return s->id == SC_BIGBOX || s->id == SC_SMALLBOX || s->id == SC_STILLSTART || s->id == SC_ROTATE || s->id == SC_SWING; }
+static inline int busy_background(const struct scene *s) { return s->id == SC_BIGBOX || s->id == SC_SMALLBOX || s->id == SC_STILLSTART || s->id == SC_ROTATE || s->id == SC_SWING || s->id == SC_COMEBACK; }
 
 static void motion_at(const struct scene *s, double t, struct motion *m)
 {
@@ -133,6 +133,21 @@ static void motion_at(const struct scene *s, double t, struct motion *m)
     case SC_SWING:
         m->X = 1.2 * sin(3.0 * t);
         m->Vx = 3.6 * cos(3.0 * t);
+        break;
+    case SC_COMEBACK:
+        /* A little still; out to the right at 21 px a frame; away for 3 s; in from the left at 5 px a frame, on to the middle. */
+        if (t < 0.5) {
+            m->X = -0.6;
+        } else if (t < 1.4) {
+            m->X = -0.6 + 4.0 * (t - 0.5);
+            m->Vx = 4.0;
+        } else if (t < 4.4) {
+            m->X = 8.0;
+        } else {
+            const double back = -3.2 + 1.0 * (t - 4.4);
+            m->X = back < 0.2 ? back : 0.2;
+            m->Vx = back < 0.2 ? 1.0 : 0.0;
+        }
         break;
     case SC_NOISE:
         m->X = -0.6 + 0.2 * t;
@@ -405,11 +420,11 @@ void scene_truth_at(const struct scene *s, double seconds, struct truth *t)
     }
 }
 
-int scene_map_left(const struct scene *s, int f0, double x0, double y0, int f1, double *x1, double *y1)
+int scene_map_left(const struct scene *s, double t0, double x0, double y0, double t1, double *x1, double *y1)
 {
     struct motion a, b;
-    motion_at(s, (double)f0 / s->fps, &a);
-    motion_at(s, (double)f1 / s->fps, &b);
+    motion_at(s, t0, &a);
+    motion_at(s, t1, &b);
     const double rx = (x0 - s->cx) / s->f, ry = (y0 - s->cy) / s->f;
     /* The nearest surface decides what the point is. */
     if (a.occ_halfx > 0.0) {

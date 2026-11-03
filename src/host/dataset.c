@@ -73,7 +73,7 @@ void dataset_roi(const struct dataset *d, int i, float *roi)
     scene_truth(&d->s, i, &t);
     /* Inside the object, except where the point of the scene is a box with background in it. */
     const enum scene_id id = d->s.id;
-    const double k = id == SC_SMALLBOX ? 4.0 : id == SC_BIGBOX || id == SC_STILLSTART || id == SC_ROTATE || id == SC_SWING ? 2.4 : 0.8;
+    const double k = id == SC_SMALLBOX ? 4.0 : id == SC_BIGBOX || id == SC_STILLSTART || id == SC_ROTATE || id == SC_SWING || id == SC_COMEBACK ? 2.4 : 0.8;
     roi[0] = (float)(t.u - k * t.half_w);
     roi[1] = (float)(t.v - k * t.half_h);
     roi[2] = (float)(2.0 * k * t.half_w);
@@ -135,7 +135,7 @@ void vt_default_config(struct vt_config *c, const struct scene *s, int stereo)
     c->min_inliers = 0.35f;
     c->prefetch = 1;
     c->max_missing = 45;
-    c->reacq_ncc = 0.75f;
+    c->reacq_ncc = 0.82f; /* near the prediction. True takes back read 0.978 and 0.988; 0.785 and 0.774 landed about 120 px from the last observed position (live, 2026-11-03) */
     c->reacq_radius = 12;
     c->fx = (float)s->f;
     c->fy = (float)s->f;

@@ -20,11 +20,13 @@ frames=150
 perframe=1
 args=("$@")
 compare=1
+generated=0
 for ((i = 0; i < ${#args[@]}; i++)); do
     case "${args[$i]}" in
         --frames) frames=${args[$((i + 1))]} ;;
         --variant | --alternate | --drop | --live | --bad-at) compare=0 ;;
         --dual) perframe=2 ;;
+        --framegen) generated=1 ;;
     esac
 done
 frames=$((frames * perframe))
@@ -33,7 +35,7 @@ rcard=0
 out/host/vt_run "$name" "$size" --hash "$hc" --csv "$out.csv" --json "$out.json" "$@" || rcard=$?
 if ((compare == 0)); then
     echo "replay: nothing to compare with for these options"
-elif out/host/vt_replay "$name" "$size" "$@" >"$hh" && [[ $(wc -l <"$hc") == "$frames" && $(wc -l <"$hh") == "$frames" ]] && cmp -s "$hc" "$hh"; then
+elif out/host/vt_replay "$name" "$size" "$@" >"$hh" && { ((generated)) && (($(wc -l <"$hc") >= frames)) || [[ $(wc -l <"$hc") == "$frames" ]]; } && [[ $(wc -l <"$hh") == $(wc -l <"$hc") ]] && cmp -s "$hc" "$hh"; then
     echo "replay: IDENTICAL, $frames frames, card MVEX = host one-thread lane model"
 else
     echo "replay: DIFFERS"

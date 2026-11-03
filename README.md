@@ -60,6 +60,7 @@ out/host/vt_attitude --transfer CALIB OLD NEW POINTS OUT TILT PAN [ROLL [FLOOR]]
 out/host/vt_attitude --solve-r CALIB OLD_POINTS NEW_POINTS OUT               # R's turn from them; L, D and the lenses held
 out/host/vt_agree CALIB PREFIX [--planes N] [--agg R] [--grid 1] [--dump OUT]  # do R and L, each referred to D, arrive at the same depth? The honest judge of the map
 echo 'flow 0' > out/run/view.cmd                                             # optical flow at pyramid level 0 (native), 1 or 2: a new session on the card
+echo 'framegen 0' > out/run/view.cmd                                         # generated frames between the real ones for the tracker, on by default (--framegen 0 at start): a new session on the card
 ```
 
 The depth map runs by itself in the live window once `current.txt` holds all three cameras. To look at it closely, from the desktop host:

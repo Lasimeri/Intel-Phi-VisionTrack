@@ -86,6 +86,7 @@ struct vt_config {
     float depth_trunc, depth_tex, depth_conf, depth_eps; /* as struct depth_cfg */
     float motion_px;         /* a cell whose vector against its camera's mean is longer than this, in pixels of the map's level, has moved */
     uint32_t flow_level;     /* the pyramid level the still pictures and their vectors run at: 0 native, at most VT_DEPTH_LEVEL. The map reads VT_DEPTH_LEVEL regardless */
+    uint32_t framegen;       /* 1: a frame is generated between real frames for the tracker of a camera with a region */
     float motion_grey;       /* a cell whose mean |frame - mean| is above this, in 8-bit grey, has changed: what a vector cannot see on a flat surface */
 };
 
@@ -138,7 +139,7 @@ struct vt_msg {
     float roi[4];            /* VT_CMD_SELECT: x, y, w, h in pixels of the left image */
     uint32_t sc_key;         /* vt_sc_key */
     float sc_value;
-    uint32_t camera, pad1;   /* which camera's tracker it is for: 0 or 1 */
+    uint32_t camera, generated; /* which camera's tracker it is for: 0 or 1; 1 on a frame made on the card between two real ones, which never crosses the wire as a frame */
     uint64_t check;          /* vt_msg_check of everything before it */
 };
 _Static_assert(sizeof(struct vt_msg) == 88, "the descriptor table's stride");
@@ -228,6 +229,7 @@ enum vt_state {
 #define VT_F_3D_MEASURED 32u /* a 3D measurement was accepted at this frame */
 #define VT_F_3D_REJECTED 64u /* a 3D measurement existed but failed the innovation gate */
 #define VT_F_AMBIGUOUS 128u  /* correspondence too ambiguous for a measurement this frame */
+#define VT_F_GENERATED 256u  /* from a frame generated between two real ones: its instance is the newer real frame's, acq_ns half way. Nothing in it is a measurement */
 
 /* Per feature. */
 #define VT_FF_STEREO 1u      /* xr, yr, disparity hold a sub-pixel match */
@@ -236,7 +238,7 @@ enum vt_state {
 #define VT_FF_NEW 8u         /* detected at this frame */
 #define VT_FF_MEMBER 16u     /* moves with the region and votes for it; without this it is riding along, on probation */
 
-enum vt_stage { VT_T_DMA_IN, VT_T_QUEUE, VT_T_PYR, VT_T_LK, VT_T_REGION, VT_T_STEREO, VT_T_EST, VT_T_TRACK, VT_T_DEPTH /* this frame's vectors, mean and, on camera D, map */, VT_T_COUNT };
+enum vt_stage { VT_T_DMA_IN, VT_T_QUEUE, VT_T_PYR, VT_T_LK, VT_T_REGION, VT_T_STEREO, VT_T_EST, VT_T_TRACK, VT_T_DEPTH /* this frame's vectors, mean and, on camera D, map */, VT_T_GEN /* making the frame before this one */, VT_T_COUNT };
 
 struct vt_feat_out {
     float x, y;       /* left image */
