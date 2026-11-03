@@ -19,7 +19,8 @@ An idle `vtrackd` is one thread napping on one word: its team is destroyed betwe
 | Pull the slot into device memory by DMA | card, ingest thread | 86 |
 | u8 to Q6, optional stretch and blur, pyramid | card, team | 165 |
 | LK with forward-backward check, per feature | card, team | 245 |
-| Region state machine, detection when needed | card, tid 0 | 51 |
+| Making a frame between two real ones, while a camera holds a region | card, team | 1,680 to 1,930; 5,950 at 1080p |
+| Region state machine; detection when needed, on the team | card, tid 0 | 51 (measured before the region model of 2026-11-03; 106 to 330 mean on the box scenes since) |
 | Stereo correspondence and triangulation | card, team | 0 in mono; 248 in stereo |
 | Kalman | card, tid 0 | under 1 in mono; 22 in stereo |
 | Result to host by DMA, status word after it | card | |
@@ -67,6 +68,29 @@ An operator's drag holds the thing and whatever is around it. The first tracker 
 **Two tolerances.** Who places the centre: the rigid core, within 1.25 px or three times its spread, whose anchors give way 3 % a frame. Who stays a member: within three frames' motion, up to 12 px at 1920 wide, whose anchors give way up to 12.5 % a frame. One tolerance for both moved the centre 2.5 px on `bigbox`, by letting features straddling the outline vote; 1.25 px for both threw out nearly everything on a real thing moving several pixels a frame.
 
 **A still region holds a frame.** After 15 frames under 0.1 px a frame its members track against that frame rather than the last, starting from where they stood, so no earlier frame's error stays in the answer. A feature the held frame no longer explains goes on from frame to frame; when under half the members are in the frame, a new one is held.
+
+### Known fault: a model that would suit a gimbal (operator's report, 2026-11-03)
+
+The operator sees the region hold still as if the cameras would swing to keep the target centred. They are fixed. So what should move is the window, across the picture, with the target. Nothing in the code steers or recentres; these assumptions, made one at a time for good reasons, add up to it:
+
+| Assumption | Where | What it does on a fixed camera |
+| --- | --- | --- |
+| What is still can be what was selected | every rider graduates in 8 frames while the box is open, `proving` | Everything still in the window becomes a member, so the background is soon the majority |
+| The majority is the region | mode of the claims, `mode_votes` | The background outvotes the thing |
+| A second thing must hold 15 % of the votes, 6 features and one rigid model within 1.25 px | `SECOND_SHARE`, the narrowing fit | A real, non-rigid mover fragments, fails, and its features are thrown out as outliers |
+| The target stays near the window's middle | `q_trial` wants its median within the inner half; votes are weighted to the middle; founders come from the inner half | The assumption a gimbal would make true. A target off the middle of its window cannot wake it |
+| Standing still is the safe answer | zero-motion favours in `framegen.c` (`FG_MID_FAVOUR_ZERO`, `FG_ENOUGH`, AMD's fallback), the held frame | Still features track better than moving ones |
+
+**Proposed, none built.** In the order they would be tried:
+
+| Fix | What changes |
+| --- | --- |
+| A scene that shows it first | A small non-rigid thing (parts moving differently) off the middle of a large window, over a busy background. It must fail today, or the fix has no test. Live: count moving field blocks inside the window, and flag a window standing still over them |
+| Motion outranks stillness | The cameras are fixed, and the attitude kernel checks that they stayed so. A coherent moving group inside the window beats any number of still features, with no share of the votes asked and no rigid fit |
+| Use the background the card already has | `still.c` keeps each camera's still picture, and the AMD field marks what moved. A feature on the background never becomes a member once the window has seen motion, and new members are seeded only on what moves. A target long still has merged into the still picture, so the selection's middle remains the fallback |
+| No test of the window's middle | The inner-half test and the centre weights go, after the selection itself |
+| The window moves by the field | Window = the selected window plus the target's accumulated motion, the median of moving field blocks inside it, which needs no rigid model. Its size stays as drawn unless the target's scale changes |
+| No favouring stillness inside the window | The zero-motion favours and the held frame apply only where no block in the window moves |
 
 ### Losing and taking back
 

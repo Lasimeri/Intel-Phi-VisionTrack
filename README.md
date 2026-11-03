@@ -13,7 +13,7 @@ Built on [Intel-Phi-7120A](https://github.com/Lasimeri/Intel-Phi-7120A) and [Int
 | --- | --- | --- |
 | M0 audit, topology, native execution | **done, on the card** | [compatibility](docs/compatibility.md) |
 | M1 SIMD numerical primitives | **done, on the card** | [measurements](docs/measurements.md) |
-| M2 optical-flow tracking | **kernel and tracking run on the card**, including reacquisition after full occlusion | [measurements](docs/measurements.md) |
+| M2 optical-flow tracking | **kernel and tracking run on the card**; frames generated between real ones for the tracker (effective 60, 60 and up to 30 a second); a lost region searched for over the whole picture until the operator ends it. On known truth in scenes; **a selected region still prefers to stand still on real targets with fixed cameras, not fixed** ([limitations](docs/limitations.md)) | [measurements](docs/measurements.md) |
 | M3 stereo reconstruction | **runs on the card, 1 to 2 mm RMSE on synthetic scenes**; ambiguity reported, gate fires | [measurements](docs/measurements.md) |
 | M4 temporal state estimation | **runs on the card**; covariance not calibrated | [measurements](docs/measurements.md) |
 | M5 live visualization, integration | **three cameras and a depth map live on the card** (L + R 1080p30, D 720p15; 15.9 maps/s at 9.8 ms, 18.41 % of textured pixels confident); LED star tracker live; the card's vectors gate the depth map's averaging; tracking first, with flow and the map in the card's idle moments; optical flow at half native (4,080 cells for L and R; native, 16,200, also holds); each camera's turn measured constantly on the card from its own picture, with no lock, carrying the geometry; **the map is not yet right: L and R mostly do not agree through D except on one near object; no measured ground truth; a real knock not yet seen live** | [measurements](docs/measurements.md) |
@@ -28,6 +28,10 @@ make                        # host tools + card programs (14 jobs); every card b
 make compdb                 # compile_commands.json + clangd, 0 diagnostics or exit 1
 scripts/vtrackd.sh start 512
 scripts/scene.sh linear3d 640x480   # the card, then its replay on the host, compared frame by frame
+scripts/scene.sh bigbox 640x480 --framegen   # with generated frames between the real ones
+scripts/scene.sh comeback 640x480 --frames 240 --gate   # past any patience and back; scene names and tolerances: tests/scenes.md
+out/host/vt_ncc_check       # nearly blank windows must never match; no card needed
+scripts/check.sh            # every gate; it takes the card, and a live window restarts after
 scripts/vtrackd.sh stop     # also puts the card's huge pages back
 ```
 

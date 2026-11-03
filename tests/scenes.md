@@ -4,6 +4,10 @@ What `vt_run --gate` holds each scene to (`score_gate` in `src/host/score.c`). T
 
 Every scene, always: a hidden region never reads as observed, and the track id does not change.
 
+`check.sh` also runs eleven of them with `--framegen`, to the same tolerances on the real frames, card against host on every result, and `vt_ncc_check`: nearly blank windows must never match in the appearance search, which no scene could show (an exactly flat patch has zero variance and was already refused).
+
+**What these do not cover.** Every moving thing here is rigid, without motion blur or change of light, and most of what its box's middle holds. All of them pass while a real selected target can still be left behind by a window that stands still ([limitations](../docs/limitations.md)). A scene with a small non-rigid mover off the middle of a large window does not exist yet, and is the first step of fixing that.
+
 | Scene | What it provokes | Continuity | EPE median | Centre median | 3D RMSE | Other |
 | --- | --- | --- | --- | --- | --- | --- |
 | translate | constant image motion, still background | >= 0.99 | <= 0.02 px | <= 0.05 px | <= 5 mm | |

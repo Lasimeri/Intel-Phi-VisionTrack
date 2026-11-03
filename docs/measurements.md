@@ -584,3 +584,18 @@ One region. A small box at full resolution needs about 16 frames a memory, about
 **Seen on the way, 1920x1080:** the selection frame of `comeback`'s 1,152 x 922 box costs 15.7 ms, and the worst reseeding frame 10.9 ms: corner detection over a very large box is still felt.
 
 **All gates on the final build:** `scripts/check.sh`, `logs/check/20261103-090516.txt`: 55 passed, 0 failed, 0 skipped.
+
+## The window standing still, live (2026-11-03, `logs/live/track-20261103-084900.csv`, real results only)
+
+The operator reports that the region holds still as though the cameras would swing to keep the target centred ([limitations](limitations.md)). What the log shows, with no truth to judge it by:
+
+| Camera | Stretch | Results | Window | Travel of its centre, x, y | Results moving under 0.2 px |
+| --- | --- | --- | --- | --- | --- |
+| L | 7.6 s, earlier | 227 | 310 x 242 growing to 467 x 364 | 509.3, 155.1 px | 8 % |
+| R | 6.2 s, earlier | 186 | 146 x 240 to 131 x 215 | 472.7, 104.7 px | 3 % |
+| L | 315.4 s | 9,452 | 467 x 364 | 1.6, 1.5 px | 100 % |
+| R | 315.3 s | 9,461 | 131 x 215 | 0.9, 1.3 px | 100 % |
+| L | 169.6 s | 5,084 | 467 x 364 | 1.2, 1.0 px | 100 % |
+| R | 169.6 s | 5,089 | 131 x 215 | 0.4, 1.2 px | 100 % |
+
+So the windows can travel, and they also stop dead for minutes reading observed with no unobserved or lost result. Whether the target was moving during the long stretches is the operator's observation, not in this log. Live latency with generated frames on is not measured either: `lat_ms` went into the log after this one.

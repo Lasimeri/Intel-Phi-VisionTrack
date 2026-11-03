@@ -1,9 +1,10 @@
 # Known limitations
 
-Current as of 2026-11-03 09:00. Numbers and their sources: [measurements.md](measurements.md). Items leave this list only with a measurement.
+Current as of 2026-11-03 09:35. Numbers and their sources: [measurements.md](measurements.md). Items leave this list only with a measurement.
 
 ## Failing, or not built
 
+- **A selected region prefers to stand still, which is wrong for fixed cameras.** The operator's report, 2026-11-03: the tracker behaves as if it wants to hold still while the cameras swing on a gimbal to keep the target centred. These cameras cannot move, so the window has to travel across the picture with the target and stay aligned with it. Nothing steers anything and the display is not recentred; the behaviour comes from the region model, whose assumptions would suit a gimbal ([architecture.md](architecture.md)). Live it fits: a 467 x 364 window in L stayed within 1.6 x 1.5 px for 315 s, reading observed, having travelled 509 px earlier. That log has no truth, so it cannot say the target moved during those 315 s. **No fix is built.** No scene shows the fault: every scene's moving thing is rigid and most of its box's middle, so all of them passing says nothing about it.
 - **Holding a selected thing has known truth only in synthetic scenes.** The scenes have no motion blur, no change of shape and no change of light on the thing, and the fastest is 21 px a frame. Live there is no truth for a moving target: only still targets have a number, and how far real fast movers go is unmeasured.
 - **A still target in L crept,** +1.34, +0.46 px over 42 s, against +21.5, +13.1 px before the region model. R, same test: +0.15, +0.05 px. Members standing still now track against a held frame, which on known truth took `hold` from 0.049 to 0.018 px, but it has **not been measured on L live**: that test was overwritten by the operator's own selections. Whether anything of the creep is left, and whether it is real change on the target, is open.
 - **Camera D holds its region worst.** In a live session it read unobserved on 22 to 49 of 75 real frames in its worst five-second windows, where L and R read observed throughout, on different targets. It has half the frame rate and a poorer sensor; the cause is not separated.
