@@ -27,6 +27,10 @@ enum scene_id {
     SC_ROTATE,      /* as bigbox, and the object turns in the image plane at 30 degrees a second */
     SC_SWING,       /* as bigbox, swinging from side to side, up to 19 pixels a frame: real things accelerate and come back */
     SC_COMEBACK,    /* as bigbox, leaves the picture to one side for 3 s, longer than any patience, and comes back from the other: 8 s, --frames 240 */
+    SC_OFFBOX,      /* rigid, wholly outside the middle half of a box five times its size; moves, stops, moves on: a window with a thing at one side of it */
+    SC_JOINTED,     /* a thing of six parts, each with a motion and a turn of its own over a common walk, blurred by the shutter: nothing rigid about it; in the middle of its box */
+    SC_OFFJOINTED,  /* the same thing off the middle of a large box: what a real drag holds */
+    SC_PASSBY,      /* a still thing selected; another crosses the box without touching it: the window has no business leaving */
     SC_DUAL,        /* a second camera off to the side, turned 17.5 degrees, a different focal length, its shutter 11 ms late: the rig of two cameras that were never a stereo pair */
     SC_COUNT,
 };
@@ -40,6 +44,7 @@ struct scene {
     int stereo;
     int select_frame;
     int samples;   /* per pixel side */
+    double shutter; /* of a frame, the exposure: 0 sees one instant */
     /* SC_DUAL, camera 1: X_b = R X_a + T */
     double b_f, b_R[9], b_T[3], b_delay_s;
 };
@@ -56,6 +61,8 @@ struct truth {
 
 void scene_setup(struct scene *s, enum scene_id id, int w, int h, int nframes, double fps);
 void scene_truth(const struct scene *s, int frame, struct truth *t);
+/* The picture at any moment, in seconds: what a frame generated for that instant should look like. frame seeds its noise. */
+void scene_render_at(const struct scene *s, double seconds, int frame, int camera, uint8_t *img);
 /* The same at any moment, in seconds from the sequence's start: a camera with a late shutter is compared with the truth of its own instant. */
 void scene_truth_at(const struct scene *s, double seconds, struct truth *t);
 /* Renders one image: camera 0 left, 1 right. img: h rows of w bytes. Threads: its own pool of up to 14. */

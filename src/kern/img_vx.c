@@ -33,6 +33,19 @@ void img_u8_to_q6_vx(const struct vt_plane *dst, const uint8_t *src, int src_str
     img_fence();
 }
 
+void img_q6_to_u8_vx(const struct vt_plane *src, uint8_t *dst, int y0, int y1)
+{
+    const float inv = 1.0f / (float)VT_Q6;
+    const vxf k = vx_bcast(&inv);
+    for (int y = y0; y < y1; y++) {
+        const float *s = plane_row(src, y);
+        uint8_t *d = dst + (ptrdiff_t)y * src->w;
+        VLOOP(x, src->w)
+            vx_store_u8(d + x, vx_mul(vx_load(s + x), k));
+    }
+    img_fence();
+}
+
 void img_norm_vx(const struct vt_plane *dst, const struct vt_plane *src, const float *gain_offset, int y0, int y1)
 {
     const vxf g = vx_bcast(gain_offset), o = vx_bcast(gain_offset + 1), lo = vx_bcast(&k_0), hi = vx_bcast(&k_max);

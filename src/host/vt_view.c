@@ -40,7 +40,11 @@
 #define RING 32
 #define SLOTS 9
 #define PANEL_ONE_VIEW 640
-#define DRAW_MIN_S (1.0 / 60.0)
+#define DRAW_MIN_S (1.0 / 60.0) /* with no results to pace them: the cameras as they come */
+#define PANEL_S 0.05            /* the panel and the depth pane, at most this often */
+#define SHOW_Q 8                /* pictures of one camera waiting for their moment */
+#define ARRIVALS 64             /* how late they arrive, remembered over about a second */
+#define SHOW_MARGIN_NS 1500000ull
 #define CAMERAS_PATH "input/calib/cameras.txt"
 #define LOCK_PATH "out/run/bench.lock"
 #define CMD_PATH "out/run/view.cmd"
@@ -56,6 +60,14 @@
 #define DIM 0x707070u
 
 enum { LINK_STARTING, LINK_TRACKING, LINK_NO_CARD, LINK_PAUSED };
+
+/* A picture waiting for its moment, and what the tracker knew of that very picture. A frame generated between two real ones exists only once the newer has arrived, so the newer is held back until the frame before it has had its turn: every picture is shown a fixed delay after its own instant. */
+struct shown {
+    uint64_t at_ns, recv_ns;
+    const uint8_t *pic;
+    int generated;
+    struct vt_result r;
+};
 
 struct cam {
     const char *dev;
@@ -77,6 +89,11 @@ struct cam {
     uint64_t recv_ns;
     struct rate { double t0; uint64_t n0; double value; } r_new, r_raw, r_res;
     uint64_t generated; /* of its results, how many came from generated frames */
+    /* The pictures on their way to the screen. */
+    struct shown *q;
+    uint64_t q_in, q_out, delay_ns, shown, shown_made, passed;
+    uint32_t arrive_us[ARRIVALS], arrivals;
+    struct rate r_shown, r_made;
     pthread_t thread;
     /* An integrated snapshot under way: the sum of the frames so far. */
     uint32_t *sum;
@@ -261,6 +278,7 @@ static void session_config(struct vt_config *c)
         c->motion_grey = 2.0f;
         c->flow_level = (uint32_t)A.flow_level;
         c->framegen = (uint32_t)A.framegen;
+        c->gen_pictures = (uint32_t)A.framegen;
     }
 }
 
@@ -284,6 +302,37 @@ static void note_pair(FILE *f, const struct vt_result *a, const struct vt_result
     fprintf(f, "%.3f %.3f %.3f %.3f e%u\n", xa, ya, xb, yb, A.pair_epoch);
     fflush(f);
     A.pairs++;
+}
+
+/* The picture of the result just merged into K->last, due at its own instant plus this camera's delay: the 95th percentile of how late pictures arrive, measured. A generated picture is the latest to arrive against its own instant, half a frame plus the card's time, so with generation on the delay is about that, and with it off it falls by itself to the card's time alone. At most 2.5 frames: a slot of the part is written again after three. */
+static void show_push(struct cam *K, const uint8_t *pic, int generated)
+{
+    const uint64_t now = vt_now_ns(), acq = K->last.hdr.acq_ns;
+    K->arrive_us[K->arrivals % ARRIVALS] = now > acq ? (uint32_t)((now - acq) / 1000u) : 0u;
+    K->arrivals++;
+    if (K->arrivals >= ARRIVALS && (K->arrivals & 15u) == 0u) {
+        uint32_t s[ARRIVALS];
+        for (int i = 0; i < ARRIVALS; i++) {
+            const uint32_t v = K->arrive_us[i];
+            int at = i;
+            for (; at > 0 && s[at - 1] > v; at--)
+                s[at] = s[at - 1];
+            s[at] = v;
+        }
+        const uint64_t most = K->fps > 0 ? 2500000000ull / (uint64_t)K->fps : 100000000ull, want = (uint64_t)s[ARRIVALS * 19 / 20] * 1000u + SHOW_MARGIN_NS;
+        K->delay_ns = want < most ? want : most;
+    }
+    struct shown *s = &K->q[K->q_in % SHOW_Q];
+    s->at_ns = acq + K->delay_ns;
+    s->recv_ns = now;
+    s->pic = pic;
+    s->generated = generated;
+    memcpy(&s->r, &K->last, offsetof(struct vt_result, feat) + (size_t)K->last.nfeat * sizeof(struct vt_feat_out));
+    K->q_in++;
+    if (K->q_in - K->q_out > SHOW_Q) {
+        K->q_out = K->q_in - SHOW_Q;
+        K->passed++;
+    }
 }
 
 static void *link_main(void *arg)
@@ -456,6 +505,13 @@ static void *link_main(void *arg)
             K->results++;
             K->generated += generated;
             K->recv_ns = vt_now_ns();
+            /* What this result is a picture of: a generated picture from the part, a real one from this window's ring, where its place travelled with the frame. */
+            if (generated) {
+                if (fresh->picture)
+                    show_push(K, A.l.part + vt_gen_offset(k, fresh->picture - 1), 1);
+            } else {
+                show_push(K, K->ring + (K->last.hdr.pub_ns % RING) * (size_t)K->w * (size_t)K->h, 0);
+            }
             A.exceptions = c->exceptions;
             /* Every 3D result, as the card computed it: what any claim about the live numbers is measured from, not what a screen showed. */
             if (K->last.state != VT_ST_NONE || (K->last.flags & (VT_F_3D_MEASURED | VT_F_3D_REJECTED | VT_F_METRIC))) {
@@ -1207,7 +1263,8 @@ int main(int argc, char **argv)
     pthread_mutex_init(&A.m, NULL);
     for (int k = 0; k < A.ncam; k++) {
         A.c[k].ring = malloc((size_t)RING * (size_t)A.c[k].w * (size_t)A.c[k].h);
-        if (!A.c[k].ring)
+        A.c[k].q = malloc(SHOW_Q * sizeof(struct shown));
+        if (!A.c[k].ring || !A.c[k].q)
             return 2;
     }
     if (vt_link_open(&A.l))
@@ -1232,11 +1289,15 @@ int main(int argc, char **argv)
     pthread_create(&nt, NULL, nav_main, NULL);
 
     int dragging = 0, drag_cam = 0, dx0 = 0, dy0 = 0, dx1 = 0, dy1 = 0;
-    struct rate r_draw = {0, 0, 0.0};
-    uint64_t drawn = 0, last_res[VT_MAX_CAMERAS] = {0, 0, 0}, last_cap[VT_MAX_CAMERAS] = {0, 0, 0};
+    uint64_t last_res[VT_MAX_CAMERAS] = {0, 0, 0}, last_cap[VT_MAX_CAMERAS] = {0, 0, 0};
     static double lat[128];
-    int nlat = 0, ilat = 0, pending = 0;
-    double lat_med = 0.0, lat_p95 = 0.0, place_t = 0.0, last_draw = 0.0;
+    int nlat = 0, ilat = 0;
+    double lat_med = 0.0, lat_p95 = 0.0, place_t = 0.0, last_draw = 0.0, last_panel = 0.0, draw_ms = 0.0, present_ms = 0.0;
+    double last_shown[VT_MAX_CAMERAS] = {0.0, 0.0, 0.0}, delay_ms[VT_MAX_CAMERAS] = {0.0, 0.0, 0.0};
+    const uint8_t *show_pic[VT_MAX_CAMERAS] = {NULL, NULL, NULL};
+    int show_made[VT_MAX_CAMERAS] = {0, 0, 0};
+    FILE *shown_csv = NULL;
+    unsigned shown_lines = 0;
     static struct vt_result r[VT_MAX_CAMERAS];
     while (!A.quit) {
         struct x11event e;
@@ -1318,25 +1379,57 @@ int main(int argc, char **argv)
                 fclose(pf);
             }
         }
-        int fresh = 0;
+        /* What is due. Each camera has its own clock, so each pane is drawn and shown when its own next picture is due, and nothing else moves. */
+        const int panel_due = t - last_panel >= PANEL_S;
         uint64_t caps[VT_MAX_CAMERAS] = {0, 0, 0};
+        unsigned dirty = 0, paced = 0;
+        const uint64_t due_ns = vt_now_ns();
         pthread_mutex_lock(&A.m);
+        const int link = A.link_state, tracking = link == LINK_TRACKING, cameras_due = t - last_draw >= DRAW_MIN_S;
         for (int k = 0; k < A.ncam; k++) {
-            caps[k] = __atomic_load_n(&A.c[k].captured, __ATOMIC_ACQUIRE);
             struct cam *K = &A.c[k];
-            if (K->results != last_res[k]) {
-                last_res[k] = K->results;
-                memcpy(&r[k], &K->last, offsetof(struct vt_result, feat) + (size_t)K->last.nfeat * sizeof(struct vt_feat_out));
-                if (k == 0) {
-                    lat[ilat] = (double)(K->recv_ns - r[0].hdr.acq_ns) * 1e-3;
+            caps[k] = __atomic_load_n(&K->captured, __ATOMIC_ACQUIRE);
+            last_res[k] = K->results;
+            delay_ms[k] = (double)K->delay_ns * 1e-6;
+            const struct shown *due = NULL;
+            uint64_t taken = 0;
+            while (K->q_out < K->q_in && K->q[K->q_out % SHOW_Q].at_ns <= due_ns) {
+                due = &K->q[K->q_out % SHOW_Q];
+                K->q_out++;
+                taken++;
+            }
+            if (due) {
+                memcpy(&r[k], &due->r, offsetof(struct vt_result, feat) + (size_t)due->r.nfeat * sizeof(struct vt_feat_out));
+                show_pic[k] = due->pic;
+                show_made[k] = due->generated;
+                K->passed += taken - 1;
+                K->shown++;
+                K->shown_made += (uint64_t)due->generated;
+                last_shown[k] = t;
+                dirty |= 1u << k;
+                paced |= 1u << k;
+                if (k == 0 && !due->generated) {
+                    lat[ilat] = (double)(due->recv_ns - due->r.hdr.acq_ns) * 1e-3;
                     ilat = (ilat + 1) % 128;
                     if (nlat < 128)
                         nlat++;
                 }
-                fresh = 1;
+            } else if (caps[k] && caps[k] != last_cap[k] && cameras_due && (!tracking || t - last_shown[k] > 0.5)) {
+                /* Nothing from the card to go with them: the cameras as they are. */
+                show_pic[k] = K->ring + ((caps[k] - 1) % RING) * (size_t)K->w * (size_t)K->h;
+                last_cap[k] = caps[k];
+                dirty |= 1u << k;
+            } else if (!caps[k] && panel_due) {
+                dirty |= 1u << k;
             }
         }
-        const int link = A.link_state;
+        if (!dirty && !panel_due) {
+            pthread_mutex_unlock(&A.m);
+            usleep(200);
+            continue;
+        }
+        if (dirty & ~paced)
+            last_draw = t;
         const uint64_t dropped = A.dropped, exc = A.exceptions, card_build = A.card_build, pairs = A.pairs;
         const int view_level = A.view_level, contrast = A.contrast, pre_gauss = A.pre_gauss, feat = A.feat;
         const struct vt_calib calib = A.calib;
@@ -1353,195 +1446,221 @@ int main(int argc, char **argv)
         pthread_mutex_unlock(&A.m);
         if (save_map && map && !dv_save(map, &calib, "out/run/map"))
             fprintf(stderr, "vt_view: depth map %llu saved: out/run/map.{bin,pgm,ply}\n", (unsigned long long)map_seq);
-        const int tracking = link == LINK_TRACKING;
-        int cap_new = 0;
+        const uint64_t draw_t0 = vt_now_ns();
+        if (panel_due) {
+            last_panel = t;
+            for (int k = 0; k < A.ncam; k++) {
+                rate_update(&A.c[k].r_new, caps[k], t);
+                rate_update(&A.c[k].r_raw, A.c[k].raw, t);
+                rate_update(&A.c[k].r_res, last_res[k], t);
+                rate_update(&A.c[k].r_shown, A.c[k].shown, t);
+                rate_update(&A.c[k].r_made, A.c[k].shown_made, t);
+            }
+            if (nlat >= 16) {
+                static double tmp[128];
+                memcpy(tmp, lat, sizeof(double) * (size_t)nlat);
+                qsort(tmp, (size_t)nlat, sizeof(double), cmp_d);
+                lat_med = tmp[nlat / 2];
+                lat_p95 = tmp[nlat * 95 / 100];
+            }
+        }
         for (int k = 0; k < A.ncam; k++) {
-            cap_new |= caps[k] != last_cap[k];
-            last_cap[k] = caps[k];
-        }
-        /* Every result redraws the whole window at most this often: three cameras would otherwise ask 150 times a second, and only the screen would notice. */
-        pending |= fresh || (!tracking && cap_new);
-        if (!pending || t - last_draw < DRAW_MIN_S) {
-            usleep(500);
-            continue;
-        }
-        pending = 0;
-        last_draw = t;
-        for (int k = 0; k < A.ncam; k++) {
-            rate_update(&A.c[k].r_new, caps[k], t);
-            rate_update(&A.c[k].r_raw, A.c[k].raw, t);
-            rate_update(&A.c[k].r_res, last_res[k], t);
-        }
-        rate_update(&r_draw, drawn, t);
-        drawn++;
-        if (nlat >= 16 && (drawn & 15) == 0) {
-            static double tmp[128];
-            memcpy(tmp, lat, sizeof(double) * (size_t)nlat);
-            qsort(tmp, (size_t)nlat, sizeof(double), cmp_d);
-            lat_med = tmp[nlat / 2];
-            lat_p95 = tmp[nlat * 95 / 100];
-        }
-        /* The frames these results came from: their ring position travelled with them. */
-        for (int k = 0; k < A.ncam; k++) {
+            if (!(dirty >> k & 1u))
+                continue;
             const struct cam *K = &A.c[k];
             const int ox = pane[k].x, oy = pane[k].y;
-            const uint64_t cap = caps[k];
-            const uint64_t have = tracking && last_res[k] ? r[k].hdr.pub_ns : (cap ? cap - 1 : 0);
-            const int in_ring = cap && have + RING - 2 > cap - 1;
-            const uint64_t show = in_ring ? have : (cap ? cap - 1 : 0);
             if (k == 0 && tracking && view_level >= 0 && r[0].debug_level == view_level && r[0].debug_w)
                 show_plane(&v, K->w, K->h, view_level, &r[0]);
-            else if (cap && A.mirror)
-                x11view_gray_mirror(&v, K->ring + (show % RING) * (uint64_t)K->w * (uint64_t)K->h, K->w, K->h, K->w, ox, oy);
-            else if (cap)
-                x11view_gray(&v, K->ring + (show % RING) * (uint64_t)K->w * (uint64_t)K->h, K->w, K->h, K->w, ox, oy, 1);
+            else if (caps[k] && A.mirror)
+                x11view_gray_mirror(&v, show_pic[k], K->w, K->h, K->w, ox, oy);
+            else if (caps[k])
+                x11view_gray(&v, show_pic[k], K->w, K->h, K->w, ox, oy, 1);
             else
                 x11view_fill(&v, ox, oy, K->w, K->h, 0x101010u);
             /* Under the tracker's own marks, and out of the way altogether while a target is being picked. */
             if (tracking && map && !dragging)
                 dv_vectors(&v, map, k, ox, oy, K->w, A.mirror, vectors_all);
             draw_view(&v, ox, oy, K, &r[k], tracking);
-            text_outlined(&v, ox + 8, oy + K->h - 22, 2, cap ? WHITE : GREY, K->name);
-            if (!cap)
+            text_outlined(&v, ox + 8, oy + K->h - 22, 2, caps[k] ? WHITE : GREY, K->name);
+            if (!caps[k])
                 text_outlined(&v, ox + 8, oy + 8, 2, WHITE, K->state ? "no frames" : "waiting for the device");
         }
         if (tracking && (r[0].state == VT_ST_OBSERVED || r[0].state == VT_ST_NEW)) {
-            if (A.ncam >= 2 && calib.valid)
+            if (A.ncam >= 2 && calib.valid && (dirty & 2u))
                 draw_epipolar(&v, &calib, &r[0], calib.R, calib.T, calib.fb, calib.cxb, calib.cyb, b, pane[1].x, pane[1].y);
-            if (A.ncam == 3 && calib.valid && calib.valid_d)
+            if (A.ncam == 3 && calib.valid && calib.valid_d && (dirty & 4u))
                 draw_epipolar(&v, &calib, &r[0], calib.Rd, calib.Td, calib.fd, calib.cxd, calib.cyd, d, pane[2].x, pane[2].y);
         }
-        if (A.ncam == 3) {
-            x11view_fill(&v, depth_pane.x, depth_pane.y, depth_pane.w, depth_pane.h, 0x0c0c0cu);
-            const int live = tracking && map && calib.valid && calib.valid_d && !map_lost;
-            if (live) {
-                const struct vt_depth_out *h = map;
-                dv_pane(&v, map, depth_pane.x, depth_pane.y, depth_pane.w, depth_pane.h, A.mirror);
-                dv_legend(&v, map, depth_pane.x + 10, depth_pane.y + depth_pane.h - 18, depth_pane.w - 20);
-                char t[96];
-                snprintf(t, sizeof t, "DEPTH MAP, FROM VIEW D: %u x %u, map %llu", h->w, h->h, (unsigned long long)h->seq);
-                text_outlined(&v, depth_pane.x + 10, depth_pane.y + 10, 2, WHITE, t);
-            } else {
-                x11view_text(&v, depth_pane.x + 10, depth_pane.y + 10, 2, WHITE, "DEPTH MAP, FROM VIEW D");
-                x11view_text(&v, depth_pane.x + 10, depth_pane.y + 34, 2, GREY, !calib.valid || !calib.valid_d ? "UNAVAILABLE: no geometry holds camera D" : !tracking ? "UNAVAILABLE: card not tracking" : !map ? "waiting for the card's first map" : "UNAVAILABLE: A CAMERA CANNOT FIND ITSELF");
+        if (A.ncam == 3 && panel_due) {
+            if (A.ncam == 3) {
+                x11view_fill(&v, depth_pane.x, depth_pane.y, depth_pane.w, depth_pane.h, 0x0c0c0cu);
+                const int live = tracking && map && calib.valid && calib.valid_d && !map_lost;
+                if (live) {
+                    const struct vt_depth_out *h = map;
+                    dv_pane(&v, map, depth_pane.x, depth_pane.y, depth_pane.w, depth_pane.h, A.mirror);
+                    dv_legend(&v, map, depth_pane.x + 10, depth_pane.y + depth_pane.h - 18, depth_pane.w - 20);
+                    char t[96];
+                    snprintf(t, sizeof t, "DEPTH MAP, FROM VIEW D: %u x %u, map %llu", h->w, h->h, (unsigned long long)h->seq);
+                    text_outlined(&v, depth_pane.x + 10, depth_pane.y + 10, 2, WHITE, t);
+                } else {
+                    x11view_text(&v, depth_pane.x + 10, depth_pane.y + 10, 2, WHITE, "DEPTH MAP, FROM VIEW D");
+                    x11view_text(&v, depth_pane.x + 10, depth_pane.y + 34, 2, GREY, !calib.valid || !calib.valid_d ? "UNAVAILABLE: no geometry holds camera D" : !tracking ? "UNAVAILABLE: card not tracking" : !map ? "waiting for the card's first map" : "UNAVAILABLE: A CAMERA CANNOT FIND ITSELF");
+                }
             }
         }
-        if (dragging) {
+        if (dragging && (dirty >> drag_cam & 1u)) {
             outline_line(&v, dx0, dy0, dx1, dy0, GREY, 1);
             outline_line(&v, dx1, dy0, dx1, dy1, GREY, 1);
             outline_line(&v, dx1, dy1, dx0, dy1, GREY, 1);
             outline_line(&v, dx0, dy1, dx0, dy0, GREY, 1);
         }
-        if (!caps[0])
-            banner(&v, a->w, a->state ? "CAMERA A: no frames" : "CAMERA A: waiting for the device");
-        else if (a->state == 2)
-            banner(&v, a->w, "CAMERA A: frames stopped");
-        else if (link == LINK_PAUSED)
-            banner(&v, a->w, "CARD: a benchmark owns it: cameras only until it finishes");
-        else if (link == LINK_NO_CARD)
-            banner(&v, a->w, "CARD: waiting for vtrackd (restarting with new code?): cameras only");
-        else if (view_level >= 0) {
-            char bn[80];
-            snprintf(bn, sizeof bn, "VIEW: card memory, pyramid level %d, what LK reads", view_level);
-            banner(&v, a->w, bn);
+        if (dirty & 1u) {
+            if (!caps[0])
+                banner(&v, a->w, a->state ? "CAMERA A: no frames" : "CAMERA A: waiting for the device");
+            else if (a->state == 2)
+                banner(&v, a->w, "CAMERA A: frames stopped");
+            else if (link == LINK_PAUSED)
+                banner(&v, a->w, "CARD: a benchmark owns it: cameras only until it finishes");
+            else if (link == LINK_NO_CARD)
+                banner(&v, a->w, "CARD: waiting for vtrackd (restarting with new code?): cameras only");
+            else if (view_level >= 0) {
+                char bn[80];
+                snprintf(bn, sizeof bn, "VIEW: card memory, pyramid level %d, what LK reads", view_level);
+                banner(&v, a->w, bn);
+            }
         }
 
-        /* The panel: everything known, and only what is known. */
-        x11view_fill(&v, panel.x, panel.y, panel.w, panel.h, 0x181818u);
-        const int trail_size = 400;
-        const int side_x = panel.x + panel.w - trail_size - 12;
-        int y = panel.y + 8;
-        panel_line(&v, &y, WHITE, "VISIONTRACK LIVE  7120A  %d VIEW%s", A.ncam, A.ncam > 1 ? "S" : "");
-        panel_line(&v, &y, DIM, "code: card %02llu:%02llu:%02llu  view %s", (unsigned long long)card_build / 10000, (unsigned long long)card_build / 100 % 100, (unsigned long long)card_build % 100, view_build);
-        panel_line(&v, &y, tracking ? WHITE : GREY, "CARD %s  bad messages %llu", tracking ? "TRACKING" : link == LINK_PAUSED ? "BENCHMARK" : link == LINK_NO_CARD ? "NOT ANSWERING" : "STARTING", (unsigned long long)exc);
-        for (int k = 0; k < A.ncam; k++) {
-            const struct cam *K = &A.c[k];
-            panel_line(&v, &y, GREY, "%c %4.1f new fps, repeats %2.0f%%, bad %llu, card %4.1f", "LRD"[k], K->r_new.value, K->raw ? 100.0 * (double)K->repeats / (double)K->raw : 0.0, (unsigned long long)K->bad, K->r_res.value);
-        }
-        panel_line(&v, &y, GREY, "L capture to result ms: median %.2f p95 %.2f", lat_med * 1e-3, lat_p95 * 1e-3);
-        panel_line(&v, &y, GREY, "frames dropped at the host %llu", (unsigned long long)dropped);
-        {
-            char rig[96];
-            int at = snprintf(rig, sizeof rig, "attitude:");
-            for (int k = 0; k < A.ncam && at < (int)sizeof rig; k++) {
-                const float shown = nav[k].state == VT_ATT_TURNED ? nav[k].corr : nav[k].corr_none;
-                at += snprintf(rig + at, sizeof rig - (size_t)at, " %c %s %.2f", "LRD"[k], nav[k].lost ? "LOST" : nav[k].state == VT_ATT_TURNED ? "turned" : nav[k].state == VT_ATT_HELD ? "still" : "-", (double)shown);
-            }
-            panel_line(&v, &y, GREY, "%s", rig);
-        }
-        {
-            char line[96], line2[96];
-            int at = snprintf(line, sizeof line, "lights, a check:"), at2 = snprintf(line2, sizeof line2, "carried deg:");
+        if (panel_due) {
+            /* The panel: everything known, and only what is known. */
+            x11view_fill(&v, panel.x, panel.y, panel.w, panel.h, 0x181818u);
+            const int trail_size = 400;
+            const int side_x = panel.x + panel.w - trail_size - 12;
+            int y = panel.y + 8;
+            panel_line(&v, &y, WHITE, "VISIONTRACK LIVE  7120A  %d VIEW%s", A.ncam, A.ncam > 1 ? "S" : "");
+            panel_line(&v, &y, DIM, "code: card %02llu:%02llu:%02llu  view %s", (unsigned long long)card_build / 10000, (unsigned long long)card_build / 100 % 100, (unsigned long long)card_build % 100, view_build);
+            panel_line(&v, &y, tracking ? WHITE : GREY, "CARD %s  bad messages %llu", tracking ? "TRACKING" : link == LINK_PAUSED ? "BENCHMARK" : link == LINK_NO_CARD ? "NOT ANSWERING" : "STARTING", (unsigned long long)exc);
             for (int k = 0; k < A.ncam; k++) {
-                at += snprintf(line + at, sizeof line - (size_t)at, " %c %d/%d", "LRD"[k], nav[k].used, nav[k].known);
-                at2 += snprintf(line2 + at2, sizeof line2 - (size_t)at2, " %c%+.2f%+.2f%+.2f", "LRD"[k], nav[k].turned[0] * 180.0 / M_PI, nav[k].turned[1] * 180.0 / M_PI, nav[k].turned[2] * 180.0 / M_PI);
+                const struct cam *K = &A.c[k];
+                panel_line(&v, &y, GREY, "%c %4.1f new, shown %4.1f, made %4.1f, repeats %2.0f%%, bad %llu", "LRD"[k], K->r_new.value, K->r_shown.value, K->r_made.value, K->raw ? 100.0 * (double)K->repeats / (double)K->raw : 0.0, (unsigned long long)K->bad);
             }
-            panel_line(&v, &y, GREY, "%s", line);
-            panel_line(&v, &y, GREY, "%s", line2);
-        }
-#define US(k) ((double)r[0].cycles[k] * 1e6 / TSC_HZ)
-        panel_line(&v, &y, GREY, "card us L: dma %.0f pyr %.0f flow %.0f region %.0f", US(VT_T_DMA_IN), US(VT_T_PYR), US(VT_T_LK), US(VT_T_REGION));
-        y += 6;
-        for (int k = 0; k < A.ncam; k++) {
-            const struct vt_result *q = &r[k];
-            const int on = tracking && (q->state == VT_ST_NEW || q->state == VT_ST_OBSERVED || q->state == VT_ST_UNOBSERVED);
-            panel_line(&v, &y, WHITE, "%c: %s", "LRD"[k], tracking ? state_name(q->state) : "-");
-            if (on) {
-                panel_line(&v, &y, GREY, " at %7.1f %6.1f  size %5.0f %4.0f  %3.0f %%", (double)q->cx, (double)q->cy, (double)q->w, (double)q->h, (double)q->inliers * 100.0);
-                if (q->flags & VT_F_PREDICTED)
-                    panel_line(&v, &y, WHITE, " PREDICTED, missing %u, best match %.2f", q->missing, (double)q->reacq_ncc);
-                else
-                    panel_line(&v, &y, GREY, " %+6.1f %+6.1f px/s  features %u/%d", (double)q->rate_u, (double)q->rate_v, q->nfeat, feat);
-            } else if (tracking && (q->flags & VT_F_NO_FEATURES)) {
-                panel_line(&v, &y, WHITE, " too little texture there");
-            } else if (tracking && q->state == VT_ST_LOST) {
-                panel_line(&v, &y, WHITE, " searching the whole picture, best match %.2f", (double)q->reacq_ncc);
+            panel_line(&v, &y, GREY, "L capture to result ms: median %.2f p95 %.2f", lat_med * 1e-3, lat_p95 * 1e-3);
+            panel_line(&v, &y, GREY, "capture to screen ms: L %.0f R %.0f D %.0f  draw %.1f present %.1f", delay_ms[0], delay_ms[1], delay_ms[2], draw_ms, present_ms);
+            panel_line(&v, &y, GREY, "frames dropped at the host %llu", (unsigned long long)dropped);
+            {
+                char rig[96];
+                int at = snprintf(rig, sizeof rig, "attitude:");
+                for (int k = 0; k < A.ncam && at < (int)sizeof rig; k++) {
+                    const float shown = nav[k].state == VT_ATT_TURNED ? nav[k].corr : nav[k].corr_none;
+                    at += snprintf(rig + at, sizeof rig - (size_t)at, " %c %s %.2f", "LRD"[k], nav[k].lost ? "LOST" : nav[k].state == VT_ATT_TURNED ? "turned" : nav[k].state == VT_ATT_HELD ? "still" : "-", (double)shown);
+                }
+                panel_line(&v, &y, GREY, "%s", rig);
             }
-        }
-        y += 6;
-        panel_line(&v, &y, WHITE, "3D POSITION, VELOCITY");
-        const struct vt_result *m3 = (r[1].flags & VT_F_METRIC) && r[1].hdr.acq_ns >= r[0].hdr.acq_ns ? &r[1] : &r[0];
-        if (A.ncam < 2) {
-            panel_line(&v, &y, GREY, "UNAVAILABLE: one camera");
-        } else if (!calib.valid) {
-            panel_line(&v, &y, GREY, "UNAVAILABLE: no calibration yet");
-            panel_line(&v, &y, DIM, "correspondences so far: %llu", (unsigned long long)pairs);
-        } else if (stale) {
-            /* No number at all: a position computed through a pose the rig has left only looks like a measurement. */
-            panel_line(&v, &y, WHITE, "UNAVAILABLE: L OR R CANNOT FIND ITSELF");
-            panel_line(&v, &y, GREY, "its picture no longer matches its reference");
-        } else if (tracking && (m3->flags & VT_F_METRIC)) {
-            const int measured = m3->age_s < 0.05;
-            panel_line(&v, &y, measured ? WHITE : GREY, "%s, age %.0f ms", measured ? "MEASURED" : "PREDICTED, NOT MEASURED", m3->age_s * 1000.0);
-            panel_line(&v, &y, WHITE, "X %+6.3f  Y %+6.3f  Z %+6.3f m", m3->pos[0], m3->pos[1], m3->pos[2]);
-            panel_line(&v, &y, GREY, "+- %5.3f    %5.3f    %5.3f", sqrt(m3->pos_cov[0]), sqrt(m3->pos_cov[4]), sqrt(m3->pos_cov[8]));
-            panel_line(&v, &y, WHITE, "V %+6.3f    %+6.3f    %+6.3f m/s", m3->vel[0], m3->vel[1], m3->vel[2]);
-            panel_line(&v, &y, GREY, "+- %5.3f    %5.3f    %5.3f", sqrt(m3->vel_var[0]), sqrt(m3->vel_var[1]), sqrt(m3->vel_var[2]));
-            panel_line(&v, &y, GREY, "rays %.1f deg apart, miss %.1f px, gap %.1f ms", r[1].parallax_deg, r[1].reproj_rms, r[1].pair_gap_ms);
-            panel_line(&v, &y, DIM, "%.72s", calib_note);
-        } else {
-            panel_line(&v, &y, GREY, "UNAVAILABLE: select the region in L and in R");
-        }
-        panel_line(&v, &y, DIM, "correspondences %llu  contrast %s  blur %s", (unsigned long long)pairs, contrast ? "on" : "off", pre_gauss ? "on" : "off");
-        if (A.ncam == 3 && map) {
-            const struct vt_depth_out *h = map;
-            const double us = 1e-3 / TSC_HZ * 1e6;
-            rate_update(&A.map_rate, map_seq, t);
+            {
+                char line[96], line2[96];
+                int at = snprintf(line, sizeof line, "lights, a check:"), at2 = snprintf(line2, sizeof line2, "carried deg:");
+                for (int k = 0; k < A.ncam; k++) {
+                    at += snprintf(line + at, sizeof line - (size_t)at, " %c %d/%d", "LRD"[k], nav[k].used, nav[k].known);
+                    at2 += snprintf(line2 + at2, sizeof line2 - (size_t)at2, " %c%+.2f%+.2f%+.2f", "LRD"[k], nav[k].turned[0] * 180.0 / M_PI, nav[k].turned[1] * 180.0 / M_PI, nav[k].turned[2] * 180.0 / M_PI);
+                }
+                panel_line(&v, &y, GREY, "%s", line);
+                panel_line(&v, &y, GREY, "%s", line2);
+            }
+    #define US(k) ((double)r[0].cycles[k] * 1e6 / TSC_HZ)
+            panel_line(&v, &y, GREY, "card us L: dma %.0f pyr %.0f flow %.0f region %.0f", US(VT_T_DMA_IN), US(VT_T_PYR), US(VT_T_LK), US(VT_T_REGION));
             y += 6;
-            panel_line(&v, &y, WHITE, "DEPTH %.1f maps/s  confident %.2f %% of %u textured", A.map_rate.value, h->textured ? 100.0 * (double)h->confident / (double)h->textured : 0.0, h->textured);
-            panel_line(&v, &y, GREY, " %.1f %% of pixels have a depth", 100.0 * (double)h->known / ((double)h->w * (double)h->h));
-            panel_line(&v, &y, GREY, " card ms: normalize %.1f sweep %.1f agg %.1f decide %.1f", (double)h->cycles_normalize * us, (double)h->cycles_sweep * us, (double)h->cycles_aggregate * us, (double)h->cycles_decide * us);
-            panel_line(&v, &y, GREY, " flow at level %u: L %u x %u cells", h->flow_level, h->cam[0].cols, h->cam[0].rows);
-            panel_line(&v, &y, GREY, " vectors ms L %.1f R %.1f D %.1f  moving %u %u %u", (double)h->cam[0].cycles_vectors * us, (double)h->cam[1].cycles_vectors * us, (double)h->cam[2].cycles_vectors * us, h->cam[0].moving, h->cam[1].moving, h->cam[2].moving);
-            panel_line(&v, &y, GREY, " frames in the means L %.0f R %.0f D %.0f", (double)h->cam[0].count_mean, (double)h->cam[1].count_mean, (double)h->cam[2].count_mean);
-            panel_line(&v, &y, GREY, " drift, camera px: L %+.2f%+.2f R %+.2f%+.2f D %+.2f%+.2f", 4.0 * (double)h->cam[0].drift_u, 4.0 * (double)h->cam[0].drift_v, 4.0 * (double)h->cam[1].drift_u, 4.0 * (double)h->cam[1].drift_v, 4.0 * (double)h->cam[2].drift_u, 4.0 * (double)h->cam[2].drift_v);
+            for (int k = 0; k < A.ncam; k++) {
+                const struct vt_result *q = &r[k];
+                const int on = tracking && (q->state == VT_ST_NEW || q->state == VT_ST_OBSERVED || q->state == VT_ST_UNOBSERVED);
+                panel_line(&v, &y, WHITE, "%c: %s", "LRD"[k], tracking ? state_name(q->state) : "-");
+                if (on) {
+                    panel_line(&v, &y, GREY, " at %7.1f %6.1f  size %5.0f %4.0f  %3.0f %%", (double)q->cx, (double)q->cy, (double)q->w, (double)q->h, (double)q->inliers * 100.0);
+                    if (q->flags & VT_F_PREDICTED)
+                        panel_line(&v, &y, WHITE, " PREDICTED, missing %u, best match %.2f", q->missing, (double)q->reacq_ncc);
+                    else
+                        panel_line(&v, &y, GREY, " %+6.1f %+6.1f px/s  features %u/%d", (double)q->rate_u, (double)q->rate_v, q->nfeat, feat);
+                } else if (tracking && (q->flags & VT_F_NO_FEATURES)) {
+                    panel_line(&v, &y, WHITE, " too little texture there");
+                } else if (tracking && q->state == VT_ST_LOST) {
+                    panel_line(&v, &y, WHITE, " searching the whole picture, best match %.2f", (double)q->reacq_ncc);
+                }
+            }
+            y += 6;
+            panel_line(&v, &y, WHITE, "3D POSITION, VELOCITY");
+            const struct vt_result *m3 = (r[1].flags & VT_F_METRIC) && r[1].hdr.acq_ns >= r[0].hdr.acq_ns ? &r[1] : &r[0];
+            if (A.ncam < 2) {
+                panel_line(&v, &y, GREY, "UNAVAILABLE: one camera");
+            } else if (!calib.valid) {
+                panel_line(&v, &y, GREY, "UNAVAILABLE: no calibration yet");
+                panel_line(&v, &y, DIM, "correspondences so far: %llu", (unsigned long long)pairs);
+            } else if (stale) {
+                /* No number at all: a position computed through a pose the rig has left only looks like a measurement. */
+                panel_line(&v, &y, WHITE, "UNAVAILABLE: L OR R CANNOT FIND ITSELF");
+                panel_line(&v, &y, GREY, "its picture no longer matches its reference");
+            } else if (tracking && (m3->flags & VT_F_METRIC)) {
+                const int measured = m3->age_s < 0.05;
+                panel_line(&v, &y, measured ? WHITE : GREY, "%s, age %.0f ms", measured ? "MEASURED" : "PREDICTED, NOT MEASURED", m3->age_s * 1000.0);
+                panel_line(&v, &y, WHITE, "X %+6.3f  Y %+6.3f  Z %+6.3f m", m3->pos[0], m3->pos[1], m3->pos[2]);
+                panel_line(&v, &y, GREY, "+- %5.3f    %5.3f    %5.3f", sqrt(m3->pos_cov[0]), sqrt(m3->pos_cov[4]), sqrt(m3->pos_cov[8]));
+                panel_line(&v, &y, WHITE, "V %+6.3f    %+6.3f    %+6.3f m/s", m3->vel[0], m3->vel[1], m3->vel[2]);
+                panel_line(&v, &y, GREY, "+- %5.3f    %5.3f    %5.3f", sqrt(m3->vel_var[0]), sqrt(m3->vel_var[1]), sqrt(m3->vel_var[2]));
+                panel_line(&v, &y, GREY, "rays %.1f deg apart, miss %.1f px, gap %.1f ms", r[1].parallax_deg, r[1].reproj_rms, r[1].pair_gap_ms);
+                panel_line(&v, &y, DIM, "%.72s", calib_note);
+            } else {
+                panel_line(&v, &y, GREY, "UNAVAILABLE: select the region in L and in R");
+            }
+            panel_line(&v, &y, DIM, "correspondences %llu  contrast %s  blur %s", (unsigned long long)pairs, contrast ? "on" : "off", pre_gauss ? "on" : "off");
+            if (A.ncam == 3 && map) {
+                const struct vt_depth_out *h = map;
+                const double us = 1e-3 / TSC_HZ * 1e6;
+                rate_update(&A.map_rate, map_seq, t);
+                y += 6;
+                panel_line(&v, &y, WHITE, "DEPTH %.1f maps/s  confident %.2f %% of %u textured", A.map_rate.value, h->textured ? 100.0 * (double)h->confident / (double)h->textured : 0.0, h->textured);
+                panel_line(&v, &y, GREY, " %.1f %% of pixels have a depth", 100.0 * (double)h->known / ((double)h->w * (double)h->h));
+                panel_line(&v, &y, GREY, " card ms: normalize %.1f sweep %.1f agg %.1f decide %.1f", (double)h->cycles_normalize * us, (double)h->cycles_sweep * us, (double)h->cycles_aggregate * us, (double)h->cycles_decide * us);
+                panel_line(&v, &y, GREY, " flow at level %u: L %u x %u cells", h->flow_level, h->cam[0].cols, h->cam[0].rows);
+                panel_line(&v, &y, GREY, " vectors ms L %.1f R %.1f D %.1f  moving %u %u %u", (double)h->cam[0].cycles_vectors * us, (double)h->cam[1].cycles_vectors * us, (double)h->cam[2].cycles_vectors * us, h->cam[0].moving, h->cam[1].moving, h->cam[2].moving);
+                panel_line(&v, &y, GREY, " frames in the means L %.0f R %.0f D %.0f", (double)h->cam[0].count_mean, (double)h->cam[1].count_mean, (double)h->cam[2].count_mean);
+                panel_line(&v, &y, GREY, " drift, camera px: L %+.2f%+.2f R %+.2f%+.2f D %+.2f%+.2f", 4.0 * (double)h->cam[0].drift_u, 4.0 * (double)h->cam[0].drift_v, 4.0 * (double)h->cam[1].drift_u, 4.0 * (double)h->cam[1].drift_v, 4.0 * (double)h->cam[2].drift_u, 4.0 * (double)h->cam[2].drift_v);
+            }
+            if (A.ncam >= 2)
+                draw_trail(&v, side_x, panel.y + 10, trail_size, &calib);
+            static const char *const help[] = {"drag: select, in each view", "right click, d: deselect", "v: view   c: contrast", "g: blur   f: all vectors", "m: mirror   [ ]: features   q: quit"};
+            for (int i = 0; i < 5; i++)
+                x11view_text(&v, side_x, panel.y + trail_size + 24 + 20 * i, 2, DIM, help[i]);
         }
-        if (A.ncam >= 2)
-            draw_trail(&v, side_x, panel.y + 10, trail_size, &calib);
-        static const char *const help[] = {"drag: select, in each view", "right click, d: deselect", "v: view   c: contrast", "g: blur   f: all vectors", "m: mirror   [ ]: features   q: quit"};
-        for (int i = 0; i < 5; i++)
-            x11view_text(&v, side_x, panel.y + trail_size + 24 + 20 * i, 2, DIM, help[i]);
-        x11view_present(&v);
+        const uint64_t draw_t1 = vt_now_ns();
+        for (int k = 0; k < A.ncam; k++)
+            if (dirty >> k & 1u)
+                x11view_present_rect(&v, pane[k].x, pane[k].y, pane[k].w, pane[k].h);
+        if (panel_due) {
+            x11view_present_rect(&v, panel.x, panel.y, panel.w, panel.h);
+            if (A.ncam == 3)
+                x11view_present_rect(&v, depth_pane.x, depth_pane.y, depth_pane.w, depth_pane.h);
+        }
+        x11view_sync(&v);
+        const uint64_t draw_t2 = vt_now_ns();
+        if (dirty) {
+            draw_ms += 0.05 * ((double)(draw_t1 - draw_t0) * 1e-6 - draw_ms);
+            present_ms += 0.05 * ((double)(draw_t2 - draw_t1) * 1e-6 - present_ms);
+        }
+        /* Every picture, as it went to the screen: what any claim about the rate on the screen is measured from. */
+        if (paced && !shown_csv) {
+            char path[80];
+            const time_t wall = time(NULL);
+            struct tm tm;
+            localtime_r(&wall, &tm);
+            strftime(path, sizeof path, "logs/live/shown-%Y%m%d-%H%M%S.csv", &tm);
+            shown_csv = fopen(path, "w");
+            if (shown_csv)
+                fprintf(shown_csv, "shown_s,camera,generated,acq_s,instance,draw_ms,present_ms\n");
+        }
+        if (shown_csv)
+            for (int k = 0; k < A.ncam; k++)
+                if (paced >> k & 1u) {
+                    fprintf(shown_csv, "%.6f,%d,%d,%.6f,%llu,%.3f,%.3f\n", (double)draw_t2 * 1e-9, k, show_made[k], (double)r[k].hdr.acq_ns * 1e-9, (unsigned long long)r[k].hdr.instance, (double)(draw_t1 - draw_t0) * 1e-6, (double)(draw_t2 - draw_t1) * 1e-6);
+                    if ((++shown_lines & 255u) == 0u)
+                        fflush(shown_csv);
+                }
     }
     pthread_join(lt, NULL);
     pthread_join(nt, NULL);

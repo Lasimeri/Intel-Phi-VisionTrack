@@ -3,6 +3,7 @@
 #define _GNU_SOURCE
 #include <stddef.h>
 #include <stdio.h>
+#include <math.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -24,6 +25,27 @@ static void host_run(void *ctx, tk_fn fn, void *arg)
     fn(arg, 0, 1);
 }
 
+/* How close a generated picture is to the true picture of its instant, against what needs no motion at all: the older frame shown again, and the two frames averaged. Over the thing with a margin, and over the whole picture, where a still background flatters everything. */
+struct fg_sse {
+    double gen, repeat, mean;
+    long n;
+};
+
+static void fg_add(struct fg_sse *q, const uint8_t *gen, const uint8_t *truth, const uint8_t *older, const uint8_t *newer, int w, int x0, int y0, int x1, int y1)
+{
+    for (int y = y0; y < y1; y++)
+        for (int x = x0; x < x1; x++) {
+            const size_t i = (size_t)y * (size_t)w + (size_t)x;
+            const double t = truth[i], g = (double)gen[i] - t, r = (double)older[i] - t, m = 0.5 * ((double)older[i] + (double)newer[i]) - t;
+            q->gen += g * g;
+            q->repeat += r * r;
+            q->mean += m * m;
+            q->n++;
+        }
+}
+
+static double psnr(double sse, long n) { return sse > 0.0 && n ? 10.0 * log10(255.0 * 255.0 * (double)n / sse) : 99.0; }
+
 int main(int argc, char **argv)
 {
     struct run_opts o;
@@ -37,6 +59,18 @@ int main(int argc, char **argv)
         if (!t[c])
             return 2;
     }
+    uint8_t *pics[2] = {NULL, NULL};
+    size_t pic_bytes[2] = {(size_t)o.cfg.width * o.cfg.height, (size_t)o.cfg.width2 * o.cfg.height2};
+    if (o.cfg.gen_pictures)
+        for (int c = 0; c < cams; c++) {
+            pics[c] = host_alloc(NULL, pic_bytes[c]);
+            if (!pics[c])
+                return 2;
+            tk_set_picture(t[c], pics[c]);
+        }
+    const int fgcheck = getenv("VT_FGCHECK") != NULL && pics[0];
+    uint8_t *fg_truth = fgcheck ? malloc(pic_bytes[0]) : NULL;
+    struct fg_sse fg_thing = {0.0, 0.0, 0.0, 0}, fg_whole = {0.0, 0.0, 0.0, 0};
     static struct fuse fu;
     fuse_init(&fu, &o.cfg);
     if (o.dual) {
@@ -64,7 +98,16 @@ int main(int argc, char **argv)
                 r.frames_skipped = 0;
                 memset(r.cycles, 0, sizeof r.cycles);
                 const size_t gbytes = offsetof(struct vt_result, feat) + (size_t)r.nfeat * sizeof(struct vt_feat_out);
-                printf("%d %016llx\n", i, (unsigned long long)vt_fnv(VT_FNV_INIT, &r, gbytes));
+                printf("%d %016llx\n", i, (unsigned long long)(vt_fnv(VT_FNV_INIT, &r, gbytes) ^ (pics[c] ? vt_fnv(VT_FNV_INIT, pics[c], pic_bytes[c]) : 0ull)));
+                if (fgcheck && c == 0 && i > 0) {
+                    const double mid = ((double)gm.acq_ns - 1e9) * 1e-9;
+                    struct truth tr;
+                    scene_truth_at(&ds.s, mid, &tr);
+                    scene_render_at(&ds.s, mid, i, 0, fg_truth);
+                    const int w = ds.s.w, h = ds.s.h, x0 = (int)(tr.u - tr.half_w) - 8, x1 = (int)(tr.u + tr.half_w) + 8, y0 = (int)(tr.v - tr.half_h) - 8, y1 = (int)(tr.v + tr.half_h) + 8;
+                    fg_add(&fg_whole, pics[0], fg_truth, dataset_left(&ds, i - 1), dataset_left(&ds, i), w, 0, 0, w, h);
+                    fg_add(&fg_thing, pics[0], fg_truth, dataset_left(&ds, i - 1), dataset_left(&ds, i), w, x0 < 0 ? 0 : x0, y0 < 0 ? 0 : y0, x1 > w ? w : x1, y1 > h ? h : y1);
+                }
                 score_frame(s, &r, 0.0, 0.0);
             }
             tk_track(t[c], set, &m, &r);
@@ -92,6 +135,8 @@ int main(int argc, char **argv)
             fclose(j);
         }
     }
+    if (fgcheck)
+        fprintf(stderr, "fgcheck %s: over the thing, dB: generated %.2f, older frame again %.2f, the two averaged %.2f; whole picture: generated %.2f, older frame again %.2f, the two averaged %.2f\n", ds.s.name, psnr(fg_thing.gen, fg_thing.n), psnr(fg_thing.repeat, fg_thing.n), psnr(fg_thing.mean, fg_thing.n), psnr(fg_whole.gen, fg_whole.n), psnr(fg_whole.repeat, fg_whole.n), psnr(fg_whole.mean, fg_whole.n));
     dataset_close(&ds);
     return 0;
 }

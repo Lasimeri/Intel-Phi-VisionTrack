@@ -543,6 +543,30 @@ My estimate from area before measuring 1080p was 13 ms. It was more than twice t
 
 **The rates, live.** `logs/live/track-20261103-083232.csv`, windows of 5 s with a region held on all three cameras: L 150 real and 150 generated results, R 150 and 150, D 75 and up to 75. That is 60, 60 and up to 30 a second, with the real frames at their full rate. These are results the tracker produced, not frames in the window. Observed: L and R on all but 0 to 2 real frames of those windows, on averages of 16 to 75 features, riders included. There is no like-for-like earlier figure: the log before this one held only results with a 3D flag. D read unobserved on 22 to 49 of 75 in its worst windows, and generated nothing while it did.
 
+## Generated frames on the screen (2026-11-03 09:56 to 10:22, card and desktop host)
+
+Every picture the window shows, as it goes to the screen: `logs/live/shown-*.csv`, local. Last 16.0 s of one session, all three cameras, nothing selected. Measured at the moment the server has it; the panel is 120 Hz, and what the compositor does after that is not measured.
+
+| Pane | Pictures/s | Generated | Gap median, p5, p95, max | Capture to screen |
+| --- | --- | --- | --- | --- |
+| L | 59.9 | 50.0 % | 16.7, 15.4, 17.9, 46.2 ms | 65.1 ms |
+| R | 60.0 | 50.0 % | 16.2, 15.2, 18.4, 25.0 ms | 65.8 ms |
+| D | 30.0 | 50.0 % | 33.7, 30.8, 35.5, 37.6 ms | 114.4 ms |
+
+Draw 0.97 ms and present 0.62 ms a 1080p pane; the panel beside it read L capture to result 42.43 ms median, 45.77 ms p95. Generating, us per frame from `scripts/vtrackd.sh log`, L 1080p: more 69, scene 422, search 2473, filter 654, upscale 417, mid 542, blend 1720, pyramid 96, **picture 78**; D 720p: 36, 206, 1361, 375, 240, 170, 601, 68, 44.
+
+**Against the truth.** A scene's mid-frame can be rendered, so the generated picture has an answer: `VT_FGCHECK=1 out/host/vt_replay NAME 640x480 --framegen`, PSNR over the moving thing with a margin. It has to beat what needs no motion at all.
+
+| Scene | Generated | The two averaged | Older frame again |
+| --- | --- | --- | --- |
+| bigbox | 45.36 dB | 41.17 dB | 33.04 dB |
+| swing, up to 19 px a frame | 31.79 dB | 21.86 dB | 19.14 dB |
+| rotate, 30 degrees a second | 45.78 dB | 42.85 dB | 34.63 dB |
+
+Over the whole picture a still background flatters all three (bigbox 56.18, 52.00, 43.88 dB). The picture's bytes are in the card against host hash of every `--framegen` scene: `replay: IDENTICAL`. All gates at this build: 55 passed, 0 failed, 0 skipped, `logs/check/20261103-102239.txt`.
+
+**A correction.** Before this the window redrew an older real picture with a generated frame's newer region over it, since a merged result kept the older ring position: the box jumped half a frame ahead of the image and the picture then caught up. The panel's 60 counted results, not pictures.
+
 ## Losing and taking back (2026-11-03 08:35 to 08:50, card)
 
 The old rule ended a region after 2 s out of sight, its appearance erased. Measured on scene `comeback` (`--frames 240`: out of the picture for 3 s, back from the other side):

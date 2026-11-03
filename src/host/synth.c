@@ -6,7 +6,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-static const char *const names[SC_COUNT] = {"translate", "shapes", "camera", "brightness", "noise", "occlusion", "loss", "leave", "helix", "linear3d", "repeat", "flat", "glitch", "bigbox", "hold", "smallbox", "stillstart", "rotate", "swing", "comeback", "dual"};
+static const char *const names[SC_COUNT] = {"translate", "shapes", "camera", "brightness", "noise", "occlusion", "loss", "leave", "helix", "linear3d", "repeat", "flat", "glitch", "bigbox", "hold", "smallbox", "stillstart", "rotate", "swing", "comeback", "offbox", "jointed", "offjointed", "passby", "dual"};
 
 const char *scene_name(enum scene_id id) { return names[id]; }
 
@@ -34,6 +34,7 @@ void scene_setup(struct scene *s, enum scene_id id, int w, int h, int nframes, d
     s->stereo = 1;
     s->select_frame = 5;
     s->samples = w > 1400 ? 2 : 3;
+    s->shutter = id == SC_JOINTED || id == SC_OFFJOINTED ? 0.5 : 0.0;
     if (id == SC_DUAL) {
         /* Camera 1 stands at C = (1.2, 0.1, 0.2) m, turned by 17.5 degrees about y toward the scene, with 70 % of the focal length. */
         const double th = 17.5 * M_PI / 180.0, ct = cos(th), st = sin(th);
@@ -58,7 +59,32 @@ struct motion {
     double noise;
     double second_x; /* a second, independent moving rectangle's X, in shapes */
     double spin;     /* the object's turn in the image plane, radians */
+    int parts;       /* a thing of parts: each where its own motion puts it, relative to X, Y */
+    double px[6], py[6], pspin[6];
 };
+
+/* Metres along the way at time t: a little still, on, a stop, on, and stopped. */
+static inline double walk(double t, double v)
+{
+    const double a = t < 0.5 ? 0.0 : t < 1.7 ? t - 0.5 : 1.2, b = t < 2.7 ? 0.0 : t < 3.7 ? t - 2.7 : 1.0;
+    return v * (a + b);
+}
+
+/* Six parts over a rectangle of half size (hx, hy), each wandering by up to 40 % of its own width and turning by up to 20 degrees, none in step with another. Across the parts the wandering averages to about nothing, but
+ * at any moment no two of them agree: at 3 rad/s and 16 px a part moves up to 1.6 px a frame against its neighbour, as much as the walk itself. */
+static void place_parts(struct motion *m, double t, double hx, double hy)
+{
+    static const double fu[6] = {2.1, 3.3, 2.7, 3.7, 2.3, 3.1}, fv[6] = {2.9, 2.2, 3.5, 2.6, 3.9, 2.4}, fs[6] = {1.7, 2.6, 2.1, 3.0, 1.9, 2.8}, ph[6] = {0.0, 1.1, 2.3, 3.7, 4.4, 5.6};
+    m->parts = 6;
+    m->halfx = hx;
+    m->halfy = hy;
+    for (int i = 0; i < 6; i++) {
+        const double rx = (i % 3 - 1) * 0.66 * hx, ry = (i < 3 ? -0.5 : 0.5) * hy, wander = 0.4 * 0.34 * hx;
+        m->px[i] = rx + wander * sin(fu[i] * t + ph[i]);
+        m->py[i] = ry + wander * sin(fv[i] * t + 1.7 * ph[i]);
+        m->pspin[i] = 0.35 * sin(fs[i] * t + 2.3 * ph[i]);
+    }
+}
 
 /* A point of the world, relative to the object's centre, in the object's own axes. */
 static inline void unturn(const struct motion *m, double *lx, double *ly)
@@ -71,7 +97,7 @@ static inline void unturn(const struct motion *m, double *lx, double *ly)
 }
 
 /* The background as busy as the object, so that features on it are as good as features on the object. */
-static inline int busy_background(const struct scene *s) { return s->id == SC_BIGBOX || s->id == SC_SMALLBOX || s->id == SC_STILLSTART || s->id == SC_ROTATE || s->id == SC_SWING || s->id == SC_COMEBACK; }
+static inline int busy_background(const struct scene *s) { return s->id == SC_BIGBOX || s->id == SC_SMALLBOX || s->id == SC_STILLSTART || s->id == SC_ROTATE || s->id == SC_SWING || s->id == SC_COMEBACK || s->id == SC_OFFBOX || s->id == SC_JOINTED || s->id == SC_OFFJOINTED || s->id == SC_PASSBY; }
 
 static void motion_at(const struct scene *s, double t, struct motion *m)
 {
@@ -148,6 +174,41 @@ static void motion_at(const struct scene *s, double t, struct motion *m)
             m->X = back < 0.2 ? back : 0.2;
             m->Vx = back < 0.2 ? 1.0 : 0.0;
         }
+        break;
+    case SC_OFFBOX:
+        /* 40 x 32 px half size at 640 wide; the box 200 x 160, its centre 150 px to the left. */
+        m->halfx = 0.25;
+        m->halfy = 0.2;
+        m->X = (370.0 - s->cx * 640.0 / s->w) / 160.0 + walk(t, 0.6);
+        m->Y = 0.06 * sin(1.3 * t);
+        m->Vx = (walk(t + 0.001, 0.6) - walk(t - 0.001, 0.6)) / 0.002;
+        m->Vy = 0.078 * cos(1.3 * t);
+        break;
+    case SC_JOINTED:
+        place_parts(m, t, 0.5, 0.4);
+        m->X = (210.0 - s->cx * 640.0 / s->w) / 160.0 + walk(t, 0.6);
+        m->Y = 0.06 * sin(1.3 * t);
+        m->Vx = (walk(t + 0.001, 0.6) - walk(t - 0.001, 0.6)) / 0.002;
+        m->Vy = 0.078 * cos(1.3 * t);
+        m->noise = 2.0;
+        break;
+    case SC_OFFJOINTED:
+        /* 48 x 40 px half size; the box 4.5 times that, its centre 160 px to the left: the thing's nearest edge 52 px outside the box's middle half. */
+        place_parts(m, t, 0.3, 0.25);
+        m->X = (376.0 - s->cx * 640.0 / s->w) / 160.0 + walk(t, 0.6);
+        m->Y = 0.06 * sin(1.3 * t);
+        m->Vx = (walk(t + 0.001, 0.6) - walk(t - 0.001, 0.6)) / 0.002;
+        m->Vy = 0.078 * cos(1.3 * t);
+        m->noise = 2.0;
+        break;
+    case SC_PASSBY:
+        /* The other thing is nearer, under the selected one and clear of it, inside the box: about 4.8 px a frame, in the box from about 1.2 s to 3.9 s. */
+        m->noise = 2.0;
+        m->occ_x = -1.4 + 0.56 * t;
+        m->occ_y = 0.39;
+        m->occ_halfx = 0.2;
+        m->occ_halfy = 0.1;
+        m->occ_z = 2.5;
         break;
     case SC_NOISE:
         m->X = -0.6 + 0.2 * t;
@@ -269,9 +330,20 @@ static inline double shade(const struct scene *s, const struct motion *m, double
     if (m->occ_halfx > 0.0) {
         const double X = ox + rx * m->occ_z, Y = oy + ry * m->occ_z;
         if (fabs(X - m->occ_x) <= m->occ_halfx && fabs(Y - m->occ_y) <= m->occ_halfy)
-            return 90.0 + 0.3 * texture(X, Y, 0.3, 21);
+            /* A thing that passes carries its surface with it; the bars of the older scenes do not, and show no motion but their edges. */
+            return s->id == SC_PASSBY ? texture(X - m->occ_x, Y - m->occ_y, 0.06, 61) : 90.0 + 0.3 * texture(X, Y, 0.3, 21);
     }
-    {
+    if (m->parts) {
+        const double X = ox + rx * m->Z, Y = oy + ry * m->Z;
+        for (int i = 0; i < m->parts; i++) {
+            double lx = X - m->X - m->px[i], ly = Y - m->Y - m->py[i];
+            const double c = cos(m->pspin[i]), sn = sin(m->pspin[i]), tx = c * lx + sn * ly, ty = c * ly - sn * lx;
+            lx = tx;
+            ly = ty;
+            if (fabs(lx) <= 0.34 * m->halfx && fabs(ly) <= 0.5 * m->halfy)
+                return texture(lx, ly, 0.06, 101 + 7 * (uint32_t)i);
+        }
+    } else {
         const double X = ox + rx * m->Z, Y = oy + ry * m->Z;
         double lx = X - m->X, ly = Y - m->Y;
         unturn(m, &lx, &ly);
@@ -329,6 +401,7 @@ static void *render_rows(void *arg)
     const struct scene *s = j->s;
     const int n = s->samples;
     const double step = 1.0 / n, start = -0.5 + 0.5 * step;
+    const int blurred = s->shutter > 0.0;
     /* The glitch: for ten frames the right image is wrong by 14 pixels. Geometry says one depth, the images another. */
     const double shift = (s->id == SC_GLITCH && j->camera == 1 && j->frame >= 70 && j->frame < 80) ? 14.0 : 0.0;
     for (int y = j->y0; y < j->y1; y++) {
@@ -337,7 +410,7 @@ static void *render_rows(void *arg)
             double sum = 0.0;
             for (int b = 0; b < n; b++)
                 for (int a = 0; a < n; a++)
-                    sum += s->id == SC_DUAL && j->camera == 1 ? shade_b(s, j->m, x + start + a * step, y + start + b * step) : shade(s, j->m, x + start + a * step + shift, y + start + b * step, j->camera);
+                    sum += s->id == SC_DUAL && j->camera == 1 ? shade_b(s, j->m, x + start + a * step, y + start + b * step) : shade(s, blurred ? &j->m[a * n + b] : j->m, x + start + a * step + shift, y + start + b * step, j->camera);
             double v = sum / (n * n);
             v = v * j->m->gain + j->m->offset;
             if (j->m->noise > 0.0)
@@ -351,15 +424,23 @@ static void *render_rows(void *arg)
 
 #define POOL 14
 
-void scene_render(const struct scene *s, int frame, int camera, uint8_t *img)
+void scene_render(const struct scene *s, int frame, int camera, uint8_t *img) { scene_render_at(s, (double)frame / s->fps + (s->id == SC_DUAL && camera == 1 ? s->b_delay_s : 0.0), frame, camera, img); }
+
+void scene_render_at(const struct scene *s, double seconds, int frame, int camera, uint8_t *img)
 {
-    struct motion m;
-    /* A late shutter sees the scene later. */
-    motion_at(s, (double)frame / s->fps + (s->id == SC_DUAL && camera == 1 ? s->b_delay_s : 0.0), &m);
+    /* A late shutter sees the scene later; a long one sees all of its exposure, one instant to a sample, centred on the frame's own time. */
+    static __thread struct motion m[16];
+    const double when = seconds;
+    motion_at(s, when, &m[0]);
+    if (s->shutter > 0.0) {
+        const int all = s->samples * s->samples;
+        for (int i = 0; i < all; i++)
+            motion_at(s, when + s->shutter / s->fps * ((i + 0.5) / all - 0.5), &m[i]);
+    }
     pthread_t th[POOL];
     struct render_job jobs[POOL];
     for (int i = 0; i < POOL; i++) {
-        jobs[i] = (struct render_job){s, &m, frame, camera, s->h * i / POOL, s->h * (i + 1) / POOL, img};
+        jobs[i] = (struct render_job){s, m, frame, camera, s->h * i / POOL, s->h * (i + 1) / POOL, img};
         pthread_create(&th[i], NULL, render_rows, &jobs[i]);
     }
     for (int i = 0; i < POOL; i++)
@@ -425,6 +506,9 @@ int scene_map_left(const struct scene *s, double t0, double x0, double y0, doubl
     struct motion a, b;
     motion_at(s, t0, &a);
     motion_at(s, t1, &b);
+    /* A thing of parts has no one motion to carry a point by. */
+    if (a.parts)
+        return 0;
     const double rx = (x0 - s->cx) / s->f, ry = (y0 - s->cy) / s->f;
     /* The nearest surface decides what the point is. */
     if (a.occ_halfx > 0.0) {

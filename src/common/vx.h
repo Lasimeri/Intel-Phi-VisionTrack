@@ -56,6 +56,8 @@ static inline vxf vx_load(const float *p) { return (vxf)_mm512_load_ps(p); }
 static inline void vx_store(float *p, vxf v) { _mm512_store_ps(p, (__m512)v); }
 /* vmovnrngoaps: a whole line written with no read-for-ownership. Only for lines not read back at once. */
 static inline void vx_store_nr(float *p, vxf v) { __builtin_ia32_knc_vmovnrngoaps_mz(VX_ALL, p, (__v16sf)v, 0); }
+/* vmovaps {uint8}: 16 floats to 16 bytes, rounded, saturated to 0 .. 255. p 16 B aligned. */
+static inline void vx_store_u8(uint8_t *p, vxf v) { __builtin_ia32_knc_vmovaps_mz(VX_ALL, p, (__v16sf)v, VX_SSS_UINT8); }
 /* vbroadcastss: p[0] in every lane. */
 static inline vxf vx_bcast(const float *p) { return (vxf)__builtin_ia32_knc_vbroadcastss_zm(VX_U, VX_ALL, p, 0); }
 /* 16 elements from any address: the unpack pair, two instructions. */
@@ -164,6 +166,7 @@ static inline vxf vx_zero(void) { vxf r; VX_LANE_LOOP r.l[i] = 0.0f; return r; }
 static inline vxf vx_load(const float *p) { vxf r; memcpy(r.l, p, sizeof r.l); return r; }
 static inline void vx_store(float *p, vxf v) { memcpy(p, v.l, sizeof v.l); }
 static inline void vx_store_nr(float *p, vxf v) { memcpy(p, v.l, sizeof v.l); }
+static inline void vx_store_u8(uint8_t *p, vxf v) { VX_LANE_LOOP { const float s = rintf(v.l[i]); p[i] = s <= 0.0f ? 0u : s >= 255.0f ? 255u : (uint8_t)s; } }
 static inline vxf vx_bcast(const float *p) { vxf r; VX_LANE_LOOP r.l[i] = *p; return r; }
 static inline vxf vx_loadu(const float *p) { return vx_load(p); }
 static inline vxf vx_load_u8(const uint8_t *p) { vxf r; VX_LANE_LOOP r.l[i] = (float)p[i]; return r; }

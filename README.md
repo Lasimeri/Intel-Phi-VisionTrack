@@ -13,7 +13,7 @@ Built on [Intel-Phi-7120A](https://github.com/Lasimeri/Intel-Phi-7120A) and [Int
 | --- | --- | --- |
 | M0 audit, topology, native execution | **done, on the card** | [compatibility](docs/compatibility.md) |
 | M1 SIMD numerical primitives | **done, on the card** | [measurements](docs/measurements.md) |
-| M2 optical-flow tracking | **kernel and tracking run on the card**; frames generated between real ones for the tracker (effective 60, 60 and up to 30 a second); a lost region searched for over the whole picture until the operator ends it. On known truth in scenes; **a selected region still prefers to stand still on real targets with fixed cameras, not fixed** ([limitations](docs/limitations.md)) | [measurements](docs/measurements.md) |
+| M2 optical-flow tracking | **kernel and tracking run on the card**; frames generated between real ones and shown (59.9, 60.0 and 30.0 pictures a second on the screen, capture to screen 65 and 114 ms); a lost region searched for over the whole picture until the operator ends it. On known truth in scenes; **a selected region still prefers to stand still on real targets with fixed cameras, not fixed** ([limitations](docs/limitations.md)) | [measurements](docs/measurements.md) |
 | M3 stereo reconstruction | **runs on the card, 1 to 2 mm RMSE on synthetic scenes**; ambiguity reported, gate fires | [measurements](docs/measurements.md) |
 | M4 temporal state estimation | **runs on the card**; covariance not calibrated | [measurements](docs/measurements.md) |
 | M5 live visualization, integration | **three cameras and a depth map live on the card** (L + R 1080p30, D 720p15; 15.9 maps/s at 9.8 ms, 18.41 % of textured pixels confident); LED star tracker live; the card's vectors gate the depth map's averaging; tracking first, with flow and the map in the card's idle moments; optical flow at half native (4,080 cells for L and R; native, 16,200, also holds); each camera's turn measured constantly on the card from its own picture, with no lock, carrying the geometry; **the map is not yet right: L and R mostly do not agree through D except on one near object; no measured ground truth; a real knock not yet seen live** | [measurements](docs/measurements.md) |
@@ -31,6 +31,7 @@ scripts/scene.sh linear3d 640x480   # the card, then its replay on the host, com
 scripts/scene.sh bigbox 640x480 --framegen   # with generated frames between the real ones
 scripts/scene.sh comeback 640x480 --frames 240 --gate   # past any patience and back; scene names and tolerances: tests/scenes.md
 out/host/vt_ncc_check       # nearly blank windows must never match; no card needed
+VT_FGCHECK=1 out/host/vt_replay bigbox 640x480 --framegen >/dev/null   # generated pictures against the true mid-frame, in dB; no card needed
 scripts/check.sh            # every gate; it takes the card, and a live window restarts after
 scripts/vtrackd.sh stop     # also puts the card's huge pages back
 ```
@@ -64,7 +65,7 @@ out/host/vt_attitude --transfer CALIB OLD NEW POINTS OUT TILT PAN [ROLL [FLOOR]]
 out/host/vt_attitude --solve-r CALIB OLD_POINTS NEW_POINTS OUT               # R's turn from them; L, D and the lenses held
 out/host/vt_agree CALIB PREFIX [--planes N] [--agg R] [--grid 1] [--dump OUT]  # do R and L, each referred to D, arrive at the same depth? The honest judge of the map
 echo 'flow 0' > out/run/view.cmd                                             # optical flow at pyramid level 0 (native), 1 or 2: a new session on the card
-echo 'framegen 0' > out/run/view.cmd                                         # generated frames between the real ones for the tracker, on by default (--framegen 0 at start): a new session on the card
+echo 'framegen 0' > out/run/view.cmd                                         # generated frames between the real ones, shown in the window, on by default (--framegen 0 at start): a new session on the card
 ```
 
 The depth map runs by itself in the live window once `current.txt` holds all three cameras. To look at it closely, from the desktop host:

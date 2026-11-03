@@ -107,7 +107,9 @@ There is no time-out. Past its patience (2 s live) a region claims no position a
 
 ### Generated frames (user's direction, 2026-11-03)
 
-Between two real frames the card makes one more for each camera with a region, which takes L and R to an effective 60 frames a second and D to 30.
+Between two real frames the card makes one more for each camera, selected or not, which takes L and R to 60 pictures a second on the screen and D to 30.
+
+**To the screen.** The picture is reduced to bytes on the team (`vmovaps {uint8}`, 78 microseconds at 1080p) and copied to a slot at the top of the shared part, on the same channel as its result and before it, so it has landed when the result says so. The window holds a queue per camera: every picture, real or made, with what the tracker knew of that very picture, is due at its own instant plus a delay, the 95th percentile of how late pictures arrive. A generated picture is the latest against its own instant, half a frame plus the card's time, so the real frame after it waits its turn; with generation off the delay falls by itself to the card's time alone. Each pane is drawn and presented when its own next picture is due, and nothing else moves. Options set aside: vectors to the host and a warp there, heavy work on the host against the project's rule; copying Q6 floats, 4 times the DMA; redrawing the 3840 x 1800 window for each picture.
 
 | Stage | What | Whose |
 | --- | --- | --- |

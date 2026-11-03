@@ -38,7 +38,9 @@ static double rms(double sum2, int n) { return n ? sqrt(sum2 / n) : 0.0; }
 struct score {
     const struct dataset *ds;
     FILE *csv;
-    struct stat_set epe, center, center_gen, gen_us, lat, reproj, nees, nis, st[VT_T_COUNT];
+    struct stat_set epe, center, center_gen, gen_us, travel, lat, reproj, nees, nis, st[VT_T_COUNT];
+    double sel_x, sel_y, sel_u, sel_v, went_win, went_thing;
+    int sel_set;
     double prev_s;
     int n_generated;
     double s_meas, s_measz, s_pos, s_vel, z_vel;
@@ -60,7 +62,7 @@ struct score *score_new(const struct dataset *ds, const char *csv_path)
     s->first_reacq = -1;
     s->csv = csv_path ? fopen(csv_path, "w") : NULL;
     if (s->csv)
-        fprintf(s->csv, "seq,index,state,flags,track,nfeat,nfeat3d,cx,cy,truth_u,truth_v,visible,center_err_px,inliers,missing,reacq_ncc,meas_x,meas_y,meas_z,pos_x,pos_y,pos_z,vel_x,vel_y,vel_z,sig_x,sig_y,sig_z,sig_vx,sig_vy,sig_vz,truth_x,truth_y,truth_z,truth_vx,truth_vy,truth_vz,reproj,nis,nees,age_s,lat_us,us_dma,us_queue,us_pyr,us_lk,us_region,us_stereo,us_est,us_track\n");
+        fprintf(s->csv, "seq,index,state,flags,track,nfeat,nfeat3d,cx,cy,truth_u,truth_v,visible,center_err_px,inliers,missing,reacq_ncc,meas_x,meas_y,meas_z,pos_x,pos_y,pos_z,vel_x,vel_y,vel_z,sig_x,sig_y,sig_z,sig_vx,sig_vy,sig_vz,truth_x,truth_y,truth_z,truth_vx,truth_vy,truth_vz,reproj,nis,nees,age_s,lat_us,us_dma,us_queue,us_pyr,us_lk,us_region,us_stereo,us_est,us_track,travel_err_px\n");
     return s;
 }
 
@@ -124,6 +126,25 @@ void score_frame(struct score *s, const struct vt_result *o, double lat_us, doub
         s->hidden += hid;
         s->hidden_observed += hid && measured;
     }
+    /* What the operator asked of a window on fixed cameras: it goes where the thing goes, from where it was drawn, whatever part of the box the thing was in. The centre against the thing's centre cannot say this: a box drawn
+     * off to one side reads a constant error when it is right, and no error when it has slid onto the thing. */
+    double terr = 0.0;
+    if (cam == 0 && fi == sc->select_frame && !s->sel_set) {
+        float roi[4];
+        dataset_roi(s->ds, fi, roi);
+        s->sel_x = (double)roi[0] + 0.5 * (double)roi[2];
+        s->sel_y = (double)roi[1] + 0.5 * (double)roi[3];
+        s->sel_u = t.u;
+        s->sel_v = t.v;
+        s->sel_set = 1;
+    }
+    if (cam == 0 && after && s->sel_set && measured && t.on_screen && t.visible >= 0.5) {
+        const double wu = (double)o->cx - s->sel_x, wv = (double)o->cy - s->sel_y, tu = t.u - s->sel_u, tv = t.v - s->sel_v;
+        terr = hypot(wu - tu, wv - tv);
+        stat_add(&s->travel, terr);
+        s->went_win = hypot(wu, wv);
+        s->went_thing = hypot(tu, tv);
+    }
     double cerr = 0.0;
     if (measured && t.on_screen && t.visible >= 0.5) {
         cerr = cam == 1 ? hypot((double)o->cx - t.ub, (double)o->cy - t.vb) : hypot((double)o->cx - t.u, (double)o->cy - t.v);
@@ -186,7 +207,7 @@ void score_frame(struct score *s, const struct vt_result *o, double lat_us, doub
                 sqrt(o->pos_cov[0]), sqrt(o->pos_cov[4]), sqrt(o->pos_cov[8]), sqrt(o->vel_var[0]), sqrt(o->vel_var[1]), sqrt(o->vel_var[2]), t.X, t.Y, t.Z, t.Vx, t.Vy, t.Vz, o->reproj_rms, o->nis, frame_nees, o->age_s, lat_us);
         for (int k = 0; k < VT_T_COUNT; k++)
             fprintf(s->csv, ",%.1f", (double)o->cycles[k] * us_per_cycle);
-        fputc('\n', s->csv);
+        fprintf(s->csv, ",%.3f\n", terr);
     }
 }
 
@@ -209,7 +230,9 @@ void score_print(struct score *s, FILE *f, const char *mode, int results, int dr
     stat_sort(&s->center);
     stat_sort(&s->center_gen);
     stat_sort(&s->gen_us);
+    stat_sort(&s->travel);
     fprintf(f, " \"generated\":{\"results\":%d,\"center_err_px\":{\"n\":%d,\"median\":%.3f,\"p95\":%.3f,\"max\":%.3f},\"make_us\":{\"median\":%.1f,\"p95\":%.1f,\"max\":%.1f}},\n", s->n_generated, s->center_gen.n, pct(&s->center_gen, .5), pct(&s->center_gen, .95), top(&s->center_gen), pct(&s->gen_us, .5), pct(&s->gen_us, .95), top(&s->gen_us));
+    fprintf(f, " \"window_travel\":{\"err_px\":{\"n\":%d,\"median\":%.3f,\"p95\":%.3f,\"max\":%.3f},\"window_went_px\":%.3f,\"thing_went_px\":%.3f},\n", s->travel.n, pct(&s->travel, .5), pct(&s->travel, .95), top(&s->travel), s->went_win, s->went_thing);
     stat_sort(&s->lat);
     stat_sort(&s->reproj);
     stat_sort(&s->nees);
@@ -271,6 +294,17 @@ int score_gate(struct score *s, FILE *f)
         NEED(cont >= 0.95, "continuity >= 0.95 with background in the box");
         NEED(center <= 4.0, "centre median <= 4 px: the region follows the object, not the background");
         NEED(pct(&s->center, .95) <= 12.0, "centre p95 <= 12 px");
+        break;
+    case SC_OFFBOX:
+    case SC_JOINTED:
+    case SC_OFFJOINTED:
+        NEED(cont >= 0.95, "continuity >= 0.95");
+        NEED(pct(&s->travel, .5) <= 4.0, "window travel median <= 4 px: it goes where the thing goes");
+        NEED(pct(&s->travel, .95) <= 12.0, "window travel p95 <= 12 px");
+        break;
+    case SC_PASSBY:
+        NEED(cont >= 0.95, "continuity >= 0.95");
+        NEED(top(&s->travel) <= 3.0, "window travel max <= 3 px: another thing crossing the box takes nothing");
         break;
     case SC_COMEBACK:
         NEED(s->n_lost > 0, "the region really ran out of patience");

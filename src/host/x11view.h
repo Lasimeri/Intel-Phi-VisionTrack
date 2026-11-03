@@ -22,6 +22,9 @@ int x11view_open(struct x11view *v, int w, int h, int x, int y, const char *titl
 int x11view_poll(struct x11view *v, struct x11event *e);
 /* Shows the image. */
 void x11view_present(struct x11view *v);
+/* Queues one part of the image to be shown; x11view_sync then waits until the server has all of them. */
+void x11view_present_rect(struct x11view *v, int x, int y, int w, int h);
+void x11view_sync(struct x11view *v);
 void x11view_close(struct x11view *v);
 /* Where the window's frame is on the desktop, title bar included: what to ask for to come back to the same place. 0, or -1. */
 int x11view_where(struct x11view *v, int *x, int *y);

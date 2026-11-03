@@ -14,6 +14,8 @@ void img_pad_tb(const struct vt_plane *pl);
 /* src: h rows of w bytes, src_stride a multiple of 16, src 16 B aligned. dst = src x 64. */
 void img_u8_to_q6_ref(const struct vt_plane *dst, const uint8_t *src, int src_stride, int y0, int y1);
 void img_u8_to_q6_vx(const struct vt_plane *dst, const uint8_t *src, int src_stride, int y0, int y1);
+/* Back to bytes, rows y0 .. y1 of a plane whose width is a multiple of 16: dst holds h rows of w bytes, 64 B aligned. */
+void img_q6_to_u8_vx(const struct vt_plane *src, uint8_t *dst, int y0, int y1);
 
 /* dst = clamp(round(src x gain + offset), 0, 16320). The configurable normalization / linear contrast stretch. */
 void img_norm_ref(const struct vt_plane *dst, const struct vt_plane *src, const float *gain_offset, int y0, int y1);

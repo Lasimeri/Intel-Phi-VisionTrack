@@ -128,7 +128,8 @@ struct tracker {
     int fg_levels, fg_hist_set, gen_skip;
     uint8_t fg_ready[3];
     void *fg_mem;
-    uint64_t fg_cycles[8], fg_runs;
+    uint64_t fg_cycles[9], fg_runs;
+    uint8_t *fg_pic; /* where a generated frame's picture goes, for the window; none: it stays for the tracker alone, and is made only for a region */
     uint64_t last_est_ns;
     /* filter */
     struct kf kf;
@@ -137,7 +138,7 @@ struct tracker {
 
 /* ---- parallel jobs ---- */
 
-enum { OP_U8, OP_NORM_IN, OP_GAUSS_IN, OP_REDUCE, OP_DIFF, OP_LK, OP_STEREO, OP_SEARCH, OP_KEY_COPY, OP_DET_TENSOR, OP_DET_RESPONSE, OP_DET_CELLS, OP_FG_MORE, OP_FG_HIST_A, OP_FG_HIST_B, OP_FG_SEARCH, OP_FG_FILTER, OP_FG_UP, OP_FG_MID, OP_FG_BLEND, OP_FG_PAD };
+enum { OP_U8, OP_NORM_IN, OP_GAUSS_IN, OP_REDUCE, OP_DIFF, OP_LK, OP_STEREO, OP_SEARCH, OP_KEY_COPY, OP_DET_TENSOR, OP_DET_RESPONSE, OP_DET_CELLS, OP_FG_MORE, OP_FG_HIST_A, OP_FG_HIST_B, OP_FG_SEARCH, OP_FG_FILTER, OP_FG_UP, OP_FG_MID, OP_FG_BLEND, OP_FG_PAD, OP_FG_PICTURE };
 #define FG_CHUNK 16 /* blocks taken at a time */
 
 struct job {
@@ -373,6 +374,9 @@ static void job_main(void *arg, int tid, int n)
     }
     case OP_FG_PAD:
         img_pad_rows(&t->fg.out, row_of(t->fg.out.h, tid, n), row_of(t->fg.out.h, tid + 1, n));
+        break;
+    case OP_FG_PICTURE:
+        img_q6_to_u8_vx(&t->fg.out, t->fg_pic, row_of(t->fg.out.h, tid, n), row_of(t->fg.out.h, tid + 1, n));
         break;
     case OP_KEY_COPY:
         for (int L = 0; L < t->levels; L++) {
@@ -634,9 +638,9 @@ void tk_fg_report(const struct tracker *t, const char *name, double cycles_per_u
 {
     if (!t->fg_runs)
         return;
-    static const char *const stage[8] = {"more", "scene", "search", "filter", "upscale", "mid", "blend", "pyramid"};
+    static const char *const stage[9] = {"more", "scene", "search", "filter", "upscale", "mid", "blend", "pyramid", "picture"};
     fprintf(stderr, "%s: frame generation, %llu frames, us each:", name, (unsigned long long)t->fg_runs);
-    for (int i = 0; i < 8; i++)
+    for (int i = 0; i < 9; i++)
         fprintf(stderr, " %s %.1f", stage[i], (double)t->fg_cycles[i] / (double)t->fg_runs / cycles_per_us);
     fprintf(stderr, "\n");
 }
@@ -654,9 +658,13 @@ static void fg_build_more(struct tracker *t, int set)
     t->fg_ready[set] = 1;
 }
 
+void tk_set_picture(struct tracker *t, uint8_t *pixels) { t->fg_pic = pixels; }
+
 int tk_generate(struct tracker *t, int set, const struct vt_msg *m, struct vt_msg *gm)
 {
-    if (!t->c.framegen || t->prev < 0 || t->prev == set || (t->state != VT_ST_NEW && t->state != VT_ST_OBSERVED) || t->nf == 0)
+    /* The window doubles every camera's picture whether or not anything is selected; the tracker wants one only for a region it can follow. */
+    const int active = (t->state == VT_ST_NEW || t->state == VT_ST_OBSERVED) && t->nf > 0;
+    if (!t->c.framegen || t->prev < 0 || t->prev == set || (!active && !t->fg_pic))
         return -1;
     const int p = t->prev, g = (set + 1) % t->nsets;
     uint64_t mark = vt_tsc();
@@ -707,16 +715,21 @@ int tk_generate(struct tracker *t, int set, const struct vt_msg *m, struct vt_ms
     FG_LAP(6);
     run_track_op(t, OP_FG_PAD, VT_ALG_MVEX);
     img_pad_tb(&f->out);
-    /* The rest of its pyramid, as any frame's. */
-    struct job *b = t->jp;
-    b->alg = VT_ALG_MVEX;
-    b->set = g;
-    b->cameras = 1;
-    for (int L = 1; L < t->levels; L++) {
-        run_build_op(t, OP_REDUCE, L);
-        img_pad_tb(&t->pyr[g][0].l[L]);
+    /* The rest of its pyramid, as any frame's, if anything is going to read it. */
+    if (active) {
+        struct job *b = t->jp;
+        b->alg = VT_ALG_MVEX;
+        b->set = g;
+        b->cameras = 1;
+        for (int L = 1; L < t->levels; L++) {
+            run_build_op(t, OP_REDUCE, L);
+            img_pad_tb(&t->pyr[g][0].l[L]);
+        }
     }
     FG_LAP(7);
+    if (t->fg_pic)
+        run_track_op(t, OP_FG_PICTURE, VT_ALG_MVEX);
+    FG_LAP(8);
 #undef FG_LAP
     *gm = *m;
     gm->cmd = VT_CMD_NONE;
@@ -927,13 +940,16 @@ static void apply_command(struct tracker *t, const struct vt_msg *d, struct vt_r
     }
 }
 
-static inline void predict_position(struct tracker *t, real dt)
+/* A rate decays per real frame, however many are made between them. */
+static inline void predict_position(struct tracker *t, real dt, int generated)
 {
     if (dt > 0.0L) {
         t->cx = (float)(R(t->cx) + R(t->rate_u) * dt);
         t->cy = (float)(R(t->cy) + R(t->rate_v) * dt);
-        t->rate_u = (float)(R(t->rate_u) * COAST_DAMP);
-        t->rate_v = (float)(R(t->rate_v) * COAST_DAMP);
+        if (!generated) {
+            t->rate_u = (float)(R(t->rate_u) * COAST_DAMP);
+            t->rate_v = (float)(R(t->rate_v) * COAST_DAMP);
+        }
     }
 }
 
@@ -1378,7 +1394,7 @@ static void region_from_flow(struct tracker *t, const struct vt_msg *d, real dt,
     t->nf = 0;
     t->state = VT_ST_UNOBSERVED;
     t->missing++;
-    predict_position(t, dt);
+    predict_position(t, dt, 0);
 }
 
 /* What a search of one remembered appearance found. */
@@ -1837,7 +1853,7 @@ void tk_track(struct tracker *t, int set, const struct vt_msg *d, struct vt_resu
         region_from_flow(t, d, dt, o);
     } else if (t->state == VT_ST_UNOBSERVED) {
         t->missing += !gen;
-        predict_position(t, dt);
+        predict_position(t, dt, gen);
     }
     if (d->cmd != VT_CMD_NONE)
         apply_command(t, d, o);

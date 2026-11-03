@@ -217,7 +217,7 @@ static int build_one(struct flow *f)
 }
 
 /* The frame between the last real one and this one, tracked, and its result sent, before this one's. Waits for its own result's copy: `res` is written again at once. Nonzero if the channel refused or timed out. */
-static int send_generated(struct tracker *t, int set, const struct vt_msg *m, struct vt_result *res, struct vt_dma *dma, uint64_t *npub, uint64_t *last_dma, uint64_t res_phys, uint64_t host_res, uint64_t pub_addr)
+static int send_generated(struct tracker *t, int set, const struct vt_msg *m, struct vt_result *res, struct vt_dma *dma, const struct arena *a, uint8_t *pic, uint64_t pic_bytes, uint32_t *pic_turn, uint64_t *npub, uint64_t *last_dma, uint64_t res_phys, uint64_t host_res, uint64_t pub_addr)
 {
     struct vt_msg gm;
     const uint64_t t0 = vt_tsc();
@@ -227,6 +227,15 @@ static int send_generated(struct tracker *t, int set, const struct vt_msg *m, st
     const uint64_t t1 = vt_tsc();
     tk_track(t, g, &gm, res);
     res->cycles[VT_T_GEN] = t1 - t0;
+    if (pic) {
+        /* The picture first, on the same channel: it has landed when the result says so. */
+        const uint32_t slot = (*pic_turn)++ % VT_GEN_SLOTS;
+        if (!copy_range(dma, a, pic, dma->region_addr + VT_PART_OFFSET + vt_gen_offset(m->camera, slot), pic_bytes, 0)) {
+            fprintf(stderr, "vtrackd: generated picture copy refused\n");
+            return -1;
+        }
+        res->picture = slot + 1;
+    }
     (*npub)++;
     res->seq = *npub;
     *last_dma = vt_dma_copy(dma, res_phys, host_res + (*npub - 1) % VT_RES_SLOTS * VT_RES_BYTES, res->hdr.length, pub_addr, *npub);
@@ -287,7 +296,7 @@ int session_track(struct vt_ctl *ctl, struct vt_dma *dma, const struct topo *top
     const size_t plane2 = cfg->dual ? plane_bytes((int)cfg->width2, (int)cfg->height2) : 0;
     const size_t plane3 = cfg->dual && cfg->width3 ? plane_bytes((int)cfg->width3, (int)cfg->height3) : 0;
     const int with_depth = cfg->dual && cfg->width3 && cfg->depth_planes;
-    const size_t need = (two ? 26 : 20) * plane + 20 * plane2 + 20 * plane3 + DEV_SLOTS * slot_bytes + (cfg->dual ? (128u << 20) : (64u << 20)) + (with_depth ? ld_bytes(cfg, n) : 0);
+    const size_t need = (two ? 26 : 20) * plane + 20 * plane2 + 20 * plane3 + DEV_SLOTS * slot_bytes + (cfg->dual ? (128u << 20) : (64u << 20)) + (with_depth ? ld_bytes(cfg, n) : 0) + (cfg->gen_pictures ? 3 * VT_GEN_PIC_BYTES : 0);
     struct arena a;
     if (arena_open(&a, need))
         return -1;
@@ -344,6 +353,23 @@ int session_track(struct vt_ctl *ctl, struct vt_dma *dma, const struct topo *top
         }
         fuse_init(&fu, cfg);
     }
+    /* A byte picture for each camera's generated frames, if the window wants them. */
+    uint8_t *gen_pic[VT_MAX_CAMERAS] = {NULL, NULL, NULL};
+    uint64_t gen_bytes[VT_MAX_CAMERAS] = {(uint64_t)cfg->width * cfg->height, (uint64_t)cfg->width2 * cfg->height2, (uint64_t)cfg->width3 * cfg->height3};
+    uint32_t gen_turn[VT_MAX_CAMERAS] = {0, 0, 0};
+    if (cfg->gen_pictures && cfg->framegen)
+        for (uint32_t k = 0; k < vt_cameras(cfg); k++) {
+            if (gen_bytes[k] > VT_GEN_PIC_BYTES) {
+                fprintf(stderr, "vtrackd: camera %u's picture does not fit a slot\n", k);
+                return -1;
+            }
+            gen_pic[k] = arena_take(&a, gen_bytes[k], 64);
+            if (!gen_pic[k]) {
+                fprintf(stderr, "vtrackd: no memory for the generated pictures\n");
+                return -1;
+            }
+            tk_set_picture(trk[k], gen_pic[k]);
+        }
     struct live_depth *ld = NULL;
     if (with_depth) {
         ld = ld_create(cfg, tm, n, &a, dma);
@@ -468,7 +494,7 @@ int session_track(struct vt_ctl *ctl, struct vt_dma *dma, const struct topo *top
             const uint64_t t0 = vt_tsc();
             tk_build(cur, set, g.dev[di], NULL, m);
             const uint64_t t1 = vt_tsc();
-            if (send_generated(cur, set, m, res, dma, &npub, &last_dma, res_phys, host_res, pub_addr)) {
+            if (send_generated(cur, set, m, res, dma, &a, gen_pic[cam], gen_bytes[cam], &gen_turn[cam], &npub, &last_dma, res_phys, host_res, pub_addr)) {
                 rc = -1;
                 break;
             }
@@ -506,7 +532,7 @@ int session_track(struct vt_ctl *ctl, struct vt_dma *dma, const struct topo *top
         } else {
             set = (int)(nres % (uint64_t)f.nsets);
             const struct built *b = &f.info[set];
-            if (send_generated(tr, set, &b->msg, res, dma, &npub, &last_dma, res_phys, host_res, pub_addr)) {
+            if (send_generated(tr, set, &b->msg, res, dma, &a, gen_pic[0], gen_bytes[0], &gen_turn[0], &npub, &last_dma, res_phys, host_res, pub_addr)) {
                 rc = -1;
                 break;
             }

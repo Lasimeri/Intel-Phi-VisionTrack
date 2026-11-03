@@ -31,6 +31,8 @@ void tk_track(struct tracker *t, int set, const struct vt_msg *m, struct vt_resu
 /* After tk_build of a real frame into `set` and before its tk_track: makes the frame half way between it and the last real one, if frame generation is on and a region exists to gain from it. Returns the set it is in, to
  * pass to tk_track with the message written to *gm, or -1 if there is none. A session of three sets, with real frame k in set k mod 3, the generated frame takes the set frame k + 1 will overwrite. */
 int tk_generate(struct tracker *t, int set, const struct vt_msg *m, struct vt_msg *gm);
+/* From now on every generated frame's picture is written to these w x h bytes, 64 B aligned, and a frame is generated whether a region exists or not. */
+void tk_set_picture(struct tracker *t, uint8_t *pixels);
 /* The appearance correlation of a zero-mean template of 32 x 21 against a plane at (x, y): what the search for a lost region is built on, exposed for its gate. */
 struct vt_plane;
 long double tk_correlate(const struct vt_plane *pl, const float *app, long double norm, int x, int y);

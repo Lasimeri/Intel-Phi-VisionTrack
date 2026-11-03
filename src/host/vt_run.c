@@ -19,6 +19,8 @@ struct recv {
     struct vt_link *l;
     struct vt_result *res;
     uint64_t *t_recv;
+    uint64_t *pic_hash; /* of a generated result's picture, as it lands: the slot is written again within a few frames */
+    const struct vt_config *cfg;
     int max;
     int count;
     int stop;
@@ -48,6 +50,10 @@ static void *recv_main(void *arg)
             memcpy(o, src, head);
             memcpy(o->feat, src + head, (size_t)o->nfeat * sizeof(struct vt_feat_out));
             r->t_recv[i] = t;
+            if (o->picture) {
+                const size_t bytes = o->hdr.camera == 0 ? (size_t)r->cfg->width * r->cfg->height : (size_t)r->cfg->width2 * r->cfg->height2;
+                r->pic_hash[i] = vt_fnv(VT_FNV_INIT, r->l->part + vt_gen_offset(o->hdr.camera, o->picture - 1), bytes);
+            }
         }
         have = pub;
         __atomic_store_n(&r->count, (int)have, __ATOMIC_RELEASE);
@@ -90,10 +96,10 @@ int main(int argc, char **argv)
     const int cams = o.dual ? 2 : 1, nmsg = nframes * cams;
     const int nresults = o.cfg.framegen ? 2 * nmsg : nmsg; /* a generated frame's result as well as each real one's */
     struct vt_result *res = malloc(sizeof(struct vt_result) * (size_t)nresults);
-    uint64_t *t_recv = calloc((size_t)nresults, 8), *t_pub = calloc((size_t)nmsg, 8);
-    if (!res || !t_recv || !t_pub)
+    uint64_t *t_recv = calloc((size_t)nresults, 8), *t_pub = calloc((size_t)nmsg, 8), *pic_hash = calloc((size_t)nresults, 8);
+    if (!res || !t_recv || !t_pub || !pic_hash)
         return 2;
-    struct recv rcv = {.l = &l, .res = res, .t_recv = t_recv, .max = nresults};
+    struct recv rcv = {.l = &l, .res = res, .t_recv = t_recv, .pic_hash = pic_hash, .cfg = &o.cfg, .max = nresults};
     pthread_t rt;
     pthread_create(&rt, NULL, recv_main, &rcv);
 
@@ -186,8 +192,9 @@ int main(int argc, char **argv)
             copy.hdr.pub_ns = 0;
             copy.hdr.slot = 0;
             copy.frames_skipped = 0;
+            copy.picture = 0;
             memset(copy.cycles, 0, sizeof copy.cycles);
-            fprintf(hf, "%d %016llx\n", fi, (unsigned long long)vt_fnv(VT_FNV_INIT, &copy, bytes));
+            fprintf(hf, "%d %016llx\n", fi, (unsigned long long)(vt_fnv(VT_FNV_INIT, &copy, bytes) ^ pic_hash[r]));
         }
         const int key = fi * cams + (int)x->hdr.camera;
         const double lat_us = key < nmsg && t_pub[key] ? (double)(t_recv[r] - t_pub[key]) * 1e-3 : 0.0;

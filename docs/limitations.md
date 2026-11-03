@@ -1,6 +1,6 @@
 # Known limitations
 
-Current as of 2026-11-03 09:35. Numbers and their sources: [measurements.md](measurements.md). Items leave this list only with a measurement.
+Current as of 2026-11-03 10:30. Numbers and their sources: [measurements.md](measurements.md). Items leave this list only with a measurement.
 
 ## Failing, or not built
 
@@ -11,8 +11,9 @@ Current as of 2026-11-03 09:35. Numbers and their sources: [measurements.md](mea
 - **A region taken back near its prediction is believed at once,** at correlation 0.82. Far from any prediction it takes 0.88, a peak 0.04 clear of any other in the band searched that frame, and the same place again on the next frame, so a lookalike in another band is not seen by that test. No scene has a lookalike appearing while the target is away. **On the current build no real target has yet been lost and taken back live:** the evidence for both the end of the time-out and the take back is scenes. An earlier build was taken by blank patches live, at correlations up to 10.6; that is fixed and gated, and live the false take-back rate since is not known.
 - **Taking back does not handle scale or turn.** A remembered appearance matches at the size and angle it had. Four memories of different ages help a thing that comes back looking as it did at one of them; a thing that comes back much nearer, or turned, may never pass and is searched for indefinitely.
 - **A lost camera does not ask the others.** With L and R holding the target, its 3D point projected into D would say where to look. Not built.
-- **Generated frames feed the tracker only; the window does not show them.** It draws the real frames, and the panel counts results, so "60" is what the tracker sees. Showing them needs each one copied to the host, about 155 MB/s for all three cameras (arithmetic).
-- **Generated frames cost about 6 ms each at 1080p**, 28.5 ms of each 66.7 ms cycle with all three cameras holding a region (arithmetic from measured stages). Real frames kept their rate in the session measured; tracking comes first, so what gives way is the depth map's time. How far it gave way is not measured.
+- **Showing generated frames costs latency.** A mid-frame cannot exist before the newer real frame has arrived, so every picture is held back: capture to screen 65.1, 65.8 and 114.4 ms for L, R and D ([measurements.md](measurements.md)). The window's picture is whole on a still taken of it, and quality is measured only on scenes: on real video only the operator's eye has judged it.
+- **A picture on the screen may be skipped under load, and the panel says so only as a lower rate.** Its largest gap in the 16 s measured was 46.2 ms on L.
+- **Generated frames cost about 6 ms each at 1080p**, and now run for every camera whether or not anything is selected. The depth map held 16.0 maps/s alongside them on the one panel reading taken; a longer measurement is owed.
 - **On `swing` generated frames make it slightly worse:** 0.003 to 0.016 px median, where without them the error is already nearly nothing. On every other box scene they help or tie.
 - **The motion field is AMD's algorithm, not AMD's code.** The FidelityFX Optical Flow search, filter and upscale are reimplemented in MVEX from the shaders; the SDK itself needs a DX12 or Vulkan GPU, and there is no AMD GPU here. The field runs at half resolution, 8 x 8 blocks there, where AMD's is at full resolution. Its scene-change test is a simple one of this project's, not AMD's.
 - **A second moving thing already in the middle of the box when selected can win.** The operator's box says nothing more about which was meant; features of something arriving later are riders and cannot.

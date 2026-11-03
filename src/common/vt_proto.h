@@ -27,7 +27,14 @@
 #define VT_XFER_BYTES (12ull << 20)
 #define VT_FRAME_OFFSET (18ull << 20)   /* frame slots */
 #define VT_MAX_SLOTS 16
-#define VT_FRAME_AREA (VT_PART_BYTES - VT_FRAME_OFFSET)
+/* Generated pictures, 8-bit grey, at the top of the part: a camera's picture is whole for three more of its generated frames, which is longer than any picture waits to be shown. */
+#define VT_GEN_CAMERAS 3
+#define VT_GEN_SLOTS 4
+#define VT_GEN_PIC_BYTES (4ull << 20)
+#define VT_GEN_BYTES (VT_GEN_CAMERAS * VT_GEN_SLOTS * VT_GEN_PIC_BYTES)
+#define VT_GEN_OFFSET (VT_PART_BYTES - VT_GEN_BYTES)
+static inline uint64_t vt_gen_offset(uint32_t camera, uint32_t slot) { return VT_GEN_OFFSET + ((uint64_t)camera * VT_GEN_SLOTS + slot) * VT_GEN_PIC_BYTES; }
+#define VT_FRAME_AREA (VT_PART_BYTES - VT_FRAME_OFFSET - VT_GEN_BYTES)
 
 #define VT_MAX_LEVELS 6
 #define VT_MAX_FEATURES 512
@@ -87,6 +94,7 @@ struct vt_config {
     float motion_px;         /* a cell whose vector against its camera's mean is longer than this, in pixels of the map's level, has moved */
     uint32_t flow_level;     /* the pyramid level the still pictures and their vectors run at: 0 native, at most VT_DEPTH_LEVEL. The map reads VT_DEPTH_LEVEL regardless */
     uint32_t framegen;       /* 1: a frame is generated between real frames for the tracker of a camera with a region */
+    uint32_t gen_pictures;   /* 1, with framegen: every camera's every generated frame is made whether a region exists or not, and its picture sent to the host before its result */
     float motion_grey;       /* a cell whose mean |frame - mean| is above this, in 8-bit grey, has changed: what a vector cannot see on a flat surface */
 };
 
@@ -269,6 +277,7 @@ struct vt_result {
     float motion;       /* mean |frame - last frame| in 8-bit grey, when asked for */
     float reacq_ncc;    /* unobserved frames: the best correlation with the stored appearance, and where, in pixels of the image */
     float reacq_x, reacq_y;
+    uint32_t picture;   /* generated frames: 1 + the slot of this camera's picture (vt_gen_offset); 0 none. It has landed by the time this result is published */
     int32_t debug_level; /* the plane sent with this result, -1 none: its size, and its stride in lanes */
     uint32_t debug_w, debug_h, debug_stride;
     float pair_ua, pair_va; /* two views: camera A's centre as carried to camera B's time */

@@ -127,6 +127,18 @@ void x11view_present(struct x11view *v)
     XSync(p->d, False);
 }
 
+void x11view_present_rect(struct x11view *v, int x, int y, int w, int h)
+{
+    struct priv *p = v->priv;
+    XShmPutImage(p->d, p->win, p->gc, p->img, x, y, x, y, (unsigned)w, (unsigned)h, False);
+}
+
+void x11view_sync(struct x11view *v)
+{
+    struct priv *p = v->priv;
+    XSync(p->d, False);
+}
+
 int x11view_where(struct x11view *v, int *x, int *y)
 {
     struct priv *p = v->priv;
