@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "attitude.h"
 #include "depth.h"
 #include "img.h"
 #include "session.h"
@@ -31,7 +32,27 @@ struct live_depth {
     uint64_t seq;
     float f, cx, cy;
     uint64_t cycles_vectors[VT_MAX_CAMERAS], cycles_mean[VT_MAX_CAMERAS];
+    struct vt_calib calib;
+    int flow_level;
+    struct vt_plane reduced[VT_MAX_CAMERAS][VT_DEPTH_LEVEL]; /* the still pictures, on their way down to the map's level */
+    struct ld_att {
+        struct att *a;
+        int have_ref;
+        double chain[4], total[4]; /* the reference's attitude, and this camera's now */
+        struct att_fix fix;
+        uint32_t state, keys, turned_run, key_age, frames;
+        uint64_t cycles;
+    } att[VT_MAX_CAMERAS];
 };
+
+/* Once a second per camera. Against this session's first settled picture, or the newest kept since: */
+#define ATT_FRAMES_L_R 30
+#define ATT_FRAMES_D 15
+#define ATT_QUIET 4        /* under 1 / this of the cells moving: a picture fit to keep */
+#define ATT_TURNED_KEY 5   /* measurements in a row that say turned, then the new pose becomes the reference */
+#define ATT_KEY_AGE 30     /* measurements at least, between references kept for the light's sake */
+#define ATT_KEY_CORR 0.8   /* a reference this far from the picture has aged: the light has changed, or things have moved */
+#define ATT_KEY_FLOOR 0.3  /* so far that nothing says the camera is where it was: the reference stays */
 
 static void *arena_alloc(void *ctx, size_t bytes) { return arena_take(ctx, bytes, 64); }
 
@@ -55,7 +76,15 @@ static struct depth_cfg map_config(const struct vt_config *c, int threads)
 static struct still_cfg still_config(const struct vt_config *c, int cam, int threads)
 {
     const uint32_t w = cam == 0 ? c->width : cam == 1 ? c->width2 : c->width3, h = cam == 0 ? c->height : cam == 1 ? c->height2 : c->height3;
-    return (struct still_cfg){.w = (int)w >> VT_DEPTH_LEVEL, .h = (int)h >> VT_DEPTH_LEVEL, .avg = (int)c->depth_avg, .motion_px = c->motion_px, .motion_grey = c->motion_grey, .threads = threads};
+    return (struct still_cfg){.w = (int)w >> c->flow_level, .h = (int)h >> c->flow_level, .avg = (int)c->depth_avg, .motion_px = c->motion_px, .motion_grey = c->motion_grey, .threads = threads};
+}
+
+/* A camera's picture at the level the map reads, whatever level the flow runs at. */
+static void map_size(const struct vt_config *c, int cam, int *w, int *h)
+{
+    const uint32_t fw = cam == 0 ? c->width : cam == 1 ? c->width2 : c->width3, fh = cam == 0 ? c->height : cam == 1 ? c->height2 : c->height3;
+    *w = (int)fw >> VT_DEPTH_LEVEL;
+    *h = (int)fh >> VT_DEPTH_LEVEL;
 }
 
 size_t ld_bytes(const struct vt_config *c, int threads)
@@ -65,8 +94,18 @@ size_t ld_bytes(const struct vt_config *c, int threads)
     int widest = 0;
     for (int k = 0; k < VT_MAX_CAMERAS; k++) {
         const struct still_cfg s = still_config(c, k, threads);
-        bytes += still_bytes(&s) + plane_bytes(s.w, s.h);
-        widest = s.w > widest ? s.w : widest;
+        int mw, mh;
+        map_size(c, k, &mw, &mh);
+        bytes += still_bytes(&s) + plane_bytes(mw, mh);
+        const struct att_cfg ac = {mw, mh, 1.0, 0.0, 0.0, c->depth_eps, threads};
+        bytes += att_bytes(&ac);
+        int rw = s.w, rh = s.h;
+        for (int i = (int)c->flow_level; i < VT_DEPTH_LEVEL; i++) {
+            rw = (rw + 1) / 2;
+            rh = (rh + 1) / 2;
+            bytes += plane_bytes(rw, rh) + 64;
+        }
+        widest = mw > widest ? mw : widest;
     }
     return bytes + plane_bytes(m.w, m.h) + (size_t)threads * depth_norm_scratch_bytes(widest);
 }
@@ -94,14 +133,33 @@ struct live_depth *ld_create(const struct vt_config *c, struct team *tm, int thr
         l->st[k] = still_create(&s, arena_alloc, a);
         if (!l->st[k])
             return NULL;
+        int mw, mh;
+        map_size(c, k, &mw, &mh);
+        const struct att_cfg ac = {mw, mh, 1.0, 0.0, 0.0, c->depth_eps, threads};
+        l->att[k].a = att_create(&ac, arena_alloc, a);
+        if (!l->att[k].a)
+            return NULL;
+        l->att[k].total[0] = l->att[k].chain[0] = 1.0;
+        int rw = s.w, rh = s.h;
+        for (int i = 0; i < VT_DEPTH_LEVEL - (int)c->flow_level; i++) {
+            rw = (rw + 1) / 2;
+            rh = (rh + 1) / 2;
+            void *pm = arena_take(a, plane_bytes(rw, rh), 64);
+            if (!pm)
+                return NULL;
+            l->reduced[k][i] = plane_at(pm, rw, rh);
+        }
         at += still_cell_bytes(l->st[k]);
-        widest = s.w > widest ? s.w : widest;
+        widest = mw > widest ? mw : widest;
     }
+    l->flow_level = (int)c->flow_level;
     if (at > VT_DEPTH_BYTES) {
         fprintf(stderr, "vtrackd: a depth map of %zu bytes does not fit its buffer\n", at);
         return NULL;
     }
-    const struct still_cfg sr = still_config(c, 1, threads), sl = still_config(c, 0, threads);
+    struct still_cfg sr, sl;
+    map_size(c, 1, &sr.w, &sr.h);
+    map_size(c, 0, &sl.w, &sl.h);
     void *pd = arena_take(a, plane_bytes(m.w, m.h), 64), *ps = arena_take(a, plane_bytes(m.w, m.h), 64), *pr = arena_take(a, plane_bytes(sr.w, sr.h), 64), *pl = arena_take(a, plane_bytes(sl.w, sl.h), 64);
     l->scratch_each = depth_norm_scratch_bytes(widest);
     l->scratch = arena_take(a, (size_t)threads * l->scratch_each, 64);
@@ -120,6 +178,7 @@ void ld_set_calib(struct live_depth *l, const struct vt_calib *c, uint64_t seq)
 {
     l->have_geometry = c->valid && c->valid_d;
     l->geometry = seq;
+    l->calib = *c;
     if (!l->have_geometry)
         return;
     const long double scale = (long double)(1 << VT_DEPTH_LEVEL);
@@ -147,6 +206,85 @@ static void team_update(void *arg, int tid, int n)
     still_update(j->s, j->cur, tid, n);
 }
 
+static void team_round(void *ctx, att_fn fn, void *arg)
+{
+    team_run(ctx, fn, arg);
+    img_fence();
+}
+
+struct reduce_job {
+    const struct vt_plane *dst, *src;
+};
+
+static void team_reduce(void *arg, int tid, int n)
+{
+    const struct reduce_job *j = arg;
+    const int h = j->dst->h, y0 = h * tid / n, y1 = h * (tid + 1) / n;
+    img_reduce_vx(j->dst, j->src, y0, y1);
+    img_pad_rows(j->dst, y0, y1);
+}
+
+/* This camera's still picture at the level the map and the attitude read: the flow may run finer. */
+static const struct vt_plane *at_map_level(struct live_depth *l, int cam)
+{
+    const struct vt_plane *src = still_mean(l->st[cam]);
+    for (int i = 0; i < VT_DEPTH_LEVEL - l->flow_level; i++) {
+        const struct reduce_job j = {&l->reduced[cam][i], src};
+        team_run(l->tm, team_reduce, (void *)&j);
+        img_fence();
+        img_pad_tb(j.dst);
+        src = j.dst;
+    }
+    return src;
+}
+
+int ld_flow_level(const struct live_depth *l) { return l->flow_level; }
+
+/* How far this camera has turned, from its whole still picture, nothing held. The reference moves on in two cases, both only while the picture is quiet: a turn that has lasted is taken into the chain, and a
+ * reference the light has left behind is replaced, there being no turn to carry. Lens as the geometry has it. */
+static void attitude_tick(struct live_depth *l, int cam)
+{
+    struct ld_att *t = &l->att[cam];
+    const struct vt_plane *mean = at_map_level(l, cam);
+    struct vt_motion m;
+    still_motion(l->st[cam], &m);
+    const int settled = m.count_mean * 4.0f >= (float)l->cfg->depth_avg;
+    const int quiet = m.moving * ATT_QUIET < m.cols * m.rows;
+    const uint64_t t0 = vt_tsc();
+    if (!t->have_ref) {
+        /* Settled is enough: the kernel votes movers out. Waiting for quiet left R, with someone in its view at native flow, with no reference at all. */
+        if (!l->have_geometry || !settled)
+            return;
+        const struct vt_calib *c = &l->calib;
+        const double s = (double)(1 << VT_DEPTH_LEVEL);
+        const double f = cam == 0 ? c->fa : cam == 1 ? c->fb : c->fd, cx = cam == 0 ? c->cxa : cam == 1 ? c->cxb : c->cxd, cy = cam == 0 ? c->cya : cam == 1 ? c->cyb : c->cyd;
+        att_set_lens(t->a, f / s, cx / s, cy / s);
+        att_set_reference(t->a, mean, team_round, l->tm);
+        t->have_ref = 1;
+        t->keys = 1;
+        t->state = VT_ATT_HELD;
+        t->cycles = vt_tsc() - t0;
+        return;
+    }
+    att_measure(t->a, mean, 1, team_round, l->tm, &t->fix);
+    att_q_mul(t->fix.q, t->chain, t->total);
+    t->state = t->fix.held ? VT_ATT_HELD : VT_ATT_TURNED;
+    t->key_age++;
+    t->turned_run = t->fix.held ? 0 : t->turned_run + 1;
+    if (quiet && settled) {
+        const int turned_for_good = !t->fix.held && t->turned_run >= ATT_TURNED_KEY;
+        const int aged = t->fix.held && t->key_age >= ATT_KEY_AGE && t->fix.corr_identity < ATT_KEY_CORR && t->fix.corr_identity > ATT_KEY_FLOOR;
+        if (turned_for_good || aged) {
+            memcpy(t->chain, t->total, sizeof t->chain);
+            att_set_reference(t->a, mean, team_round, l->tm);
+            t->keys++;
+            t->key_age = 0;
+            t->turned_run = 0;
+        }
+    }
+    t->cycles = vt_tsc() - t0;
+}
+
 void ld_frame(struct live_depth *l, int cam, const struct vt_plane *cur)
 {
     struct frame_job j = {l->st[cam], cur};
@@ -163,6 +301,11 @@ void ld_frame(struct live_depth *l, int cam, const struct vt_plane *cur)
     const uint64_t t2 = vt_tsc();
     l->cycles_vectors[cam] = t1 - t0;
     l->cycles_mean[cam] = t2 - t1;
+    struct ld_att *t = &l->att[cam];
+    if (++t->frames >= (cam == 2 ? ATT_FRAMES_D : ATT_FRAMES_L_R)) {
+        t->frames = 0;
+        attitude_tick(l, cam);
+    }
 }
 
 struct norm_job {
@@ -190,7 +333,7 @@ uint64_t ld_map(struct live_depth *l, const struct vt_msg *m, uint64_t status_ad
     if (!l->have_geometry)
         return 0;
     const float eps = l->cfg->depth_eps;
-    const struct norm_job a = {&l->nd, &l->sd, still_mean(l->st[2]), eps, l->scratch, l->scratch_each}, b = {&l->nr, NULL, still_mean(l->st[1]), eps, l->scratch, l->scratch_each}, c = {&l->nl, NULL, still_mean(l->st[0]), eps, l->scratch, l->scratch_each};
+    const struct norm_job a = {&l->nd, &l->sd, at_map_level(l, 2), eps, l->scratch, l->scratch_each}, b = {&l->nr, NULL, at_map_level(l, 1), eps, l->scratch, l->scratch_each}, c = {&l->nl, NULL, at_map_level(l, 0), eps, l->scratch, l->scratch_each};
     const uint64_t t0 = vt_tsc();
     team_run(l->tm, team_norm, (void *)&a);
     team_run(l->tm, team_norm, (void *)&b);
@@ -227,6 +370,7 @@ uint64_t ld_map(struct live_depth *l, const struct vt_msg *m, uint64_t status_ad
     h->cx = l->cx;
     h->cy = l->cy;
     h->views = 2;
+    h->flow_level = (uint32_t)l->flow_level;
     depth_counts(l->d, l->n, &h->textured, &h->confident, &h->known);
     h->cycles_normalize = t1 - t0;
     h->cycles_sweep = t2 - t1;
@@ -249,6 +393,16 @@ uint64_t ld_map(struct live_depth *l, const struct vt_msg *m, uint64_t status_ad
         mo->cell_at = (uint32_t)at;
         mo->cycles_vectors = l->cycles_vectors[k];
         mo->cycles_mean = l->cycles_mean[k];
+        const struct ld_att *t = &l->att[k];
+        memcpy(mo->att_q, t->total, sizeof mo->att_q);
+        mo->att_corr = (float)t->fix.corr;
+        mo->att_corr_none = (float)t->fix.corr_identity;
+        mo->att_used = (float)t->fix.used;
+        mo->att_view = (float)t->fix.view;
+        mo->att_peak_z = (float)t->fix.peak_z;
+        mo->att_state = t->state;
+        mo->att_keys = t->keys;
+        mo->cycles_att = t->cycles;
         const size_t bytes = still_cell_bytes(l->st[k]);
         if (!session_copy_out(l->dma, l->a, (void *)still_cells(l->st[k]), host + at, bytes))
             return UINT64_MAX;

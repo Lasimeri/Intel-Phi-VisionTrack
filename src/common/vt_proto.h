@@ -22,10 +22,10 @@
 #define VT_RES_SLOTS 16
 #define VT_RES_BYTES (64u << 10)
 #define VT_DEPTH_OFFSET (2ull << 20)    /* the depth map: two buffers, depth_pub names the one that is complete */
-#define VT_DEPTH_BYTES (1ull << 20)
-#define VT_XFER_OFFSET (4ull << 20)     /* the transfer benchmark's buffer, up to 12 MiB */
+#define VT_DEPTH_BYTES (2ull << 20)     /* the map and every camera's cells: at native flow, 16,200 cells each for L and R */
+#define VT_XFER_OFFSET (6ull << 20)     /* the transfer benchmark's buffer, up to 12 MiB */
 #define VT_XFER_BYTES (12ull << 20)
-#define VT_FRAME_OFFSET (16ull << 20)   /* frame slots */
+#define VT_FRAME_OFFSET (18ull << 20)   /* frame slots */
 #define VT_MAX_SLOTS 16
 #define VT_FRAME_AREA (VT_PART_BYTES - VT_FRAME_OFFSET)
 
@@ -85,6 +85,7 @@ struct vt_config {
     float depth_near, depth_far;      /* metres */
     float depth_trunc, depth_tex, depth_conf, depth_eps; /* as struct depth_cfg */
     float motion_px;         /* a cell whose vector against its camera's mean is longer than this, in pixels of the map's level, has moved */
+    uint32_t flow_level;     /* the pyramid level the still pictures and their vectors run at: 0 native, at most VT_DEPTH_LEVEL. The map reads VT_DEPTH_LEVEL regardless */
     float motion_grey;       /* a cell whose mean |frame - mean| is above this, in 8-bit grey, has changed: what a vector cannot see on a flat surface */
 };
 
@@ -315,7 +316,17 @@ struct vt_motion {
     float pad;
     uint64_t cycles_vectors, cycles_mean; /* card TSC, the newest frame */
     uint64_t frames;    /* of this camera, this session */
+    /* How far this camera has turned since the session's first picture of it: attitude.h. */
+    double att_q[4];    /* w x y z: a bearing b in that pose is seen at q b q' now */
+    float att_corr, att_corr_none; /* the picture against its reference, turned and not turned */
+    float att_used, att_view;      /* the kernel's share of the pixels in view, and the share in view */
+    float att_peak_z;   /* the search's peak, in standard deviations */
+    uint32_t att_state; /* VT_ATT_* */
+    uint32_t att_keys;  /* references taken this session */
+    uint32_t att_pad;
+    uint64_t cycles_att; /* card TSC, the newest measurement */
 };
+enum { VT_ATT_NONE, VT_ATT_HELD, VT_ATT_TURNED };
 
 /* What each buffer starts with. Then z, F32 metres, 0 = unknown, h rows of stride lanes at VT_DEPTH_Z_AT; conf, the same size, after it; then each camera's cells. */
 struct vt_depth_out {
@@ -326,7 +337,7 @@ struct vt_depth_out {
     uint32_t w, h, stride, planes;
     float z_near, z_far;
     float f, cx, cy;     /* the reference's, at this level: what turns a pixel and a depth into a point */
-    float pad;
+    uint32_t flow_level; /* of the cells below */
     uint32_t textured;   /* pixels with enough texture for a depth */
     uint32_t confident;  /* of those, confidence at least 0.2: the number every offline figure quotes */
     uint32_t known;      /* pixels with a depth */

@@ -39,7 +39,11 @@ while kill -0 "$view_pid" 2>/dev/null; do
         card_t=$t
         echo "live: new card code, restarting vtrackd on the card ($(date +%T))" | tee -a "$log"
         scripts/vtrackd.sh stop >>"$log" 2>&1 || true
-        scripts/vtrackd.sh start 512 >>"$log" 2>&1
+        # A start that fails must not take the window with it: try again on the next look.
+        if ! scripts/vtrackd.sh start 512 >>"$log" 2>&1; then
+            echo "live: the card program did not start, trying again ($(date +%T))" | tee -a "$log"
+            card_t=0
+        fi
     fi
     t=$(stat -c %Y out/host/vt_view 2>/dev/null || echo 0)
     if [[ $t != 0 && $t != "$view_t" ]] && settled "$t"; then

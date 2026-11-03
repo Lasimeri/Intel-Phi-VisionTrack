@@ -380,3 +380,82 @@ Reported by the user as periodic freezes. Measured without touching the process:
 **Cause:** `star_tick` (16 whole frames summed per camera) and `rig_tick` ran on the draw thread once a second, so 2 or 3 displayed frames were lost at every tick. They now run on `nav_main`, which carries the same work (median 33 ms, max 38, period 1.00 s), and the window reads a snapshot published under the mutex. `draw_trail` read the geometry unlocked, safe only while one thread did everything; it now reads the snapshot. Card programs unchanged by hash.
 
 **The cameras and the card were not stalling:** over 148,921 maps (2.8 h), no stall of 133 ms or more on L or R; 3 maps got no L frame and 0 no R frame. No USB events in the kernel log in 60 minutes. Tracking on the card never went through the draw thread, so whether tracking itself improves is not measured.
+
+## Constant attitude from the picture (2026-11-03 05:52 to 06:30)
+
+`src/kern/attitude.{h,c}`, original C, one source for card and host. `out/host/vt_attitude`; live: `logs/live/attitude-*.csv`. Each camera against its own reference picture: normalized correlation over shifts, then Gauss-Newton on the rotation with a Tukey kernel. No lock on any region or light, no still rig, no empty room.
+
+**Known rotations of a second real exposure** (independent noise, same light, someone in view), `vt_attitude --test CALIB A CAM T P R B`:
+
+| Camera | Put in, tilt pan roll | Recovered | Miss deg | Correlation gain |
+| --- | --- | --- | --- | --- |
+| R | 0 0 0 | held | 0.000 | 0.000 |
+| R | 0.1 0 0 | 0.106 -0.001 -0.002 | 0.006 | 0.062 |
+| R | 0 0.2 0 | 0.006 0.201 0.001 | 0.006 | 0.197 |
+| R | 0 0.5 0 | 0.006 0.499 -0.002 | 0.007 | 0.596 |
+| R | 1 -2 0.5 | 1.007 -1.999 0.498 | 0.007 | 0.883 |
+| R | 0 -9 0 | 0.008 -8.997 -0.004 | 0.009 | 0.871 |
+| L | 0 0.5 0 | 0.007 0.504 0.003 | 0.008 | 0.660 |
+| D | 0 0.2 0 | -0.008 0.194 0.024 | 0.026 | 0.192 |
+| D | 0.5 0 0 | 0.496 -0.009 0.016 | 0.019 | 0.404 |
+| D | 3 -2 1 | 2.992 -2.013 1.025 | 0.029 | 0.563 |
+
+The gain the 0.05 and 0.1 degree trials showed before the final gate (0.016 to 0.072) now falls under it, so those are held: **turns of about 0.1 degree and under go uncorrected.** The turn itself is warped in software: this tests the arithmetic against real pictures, not a camera really being knocked.
+
+**False turns, live on D, someone close in view:** without a gate, up to 0.33 degrees, largest gain 0.053 of 68 measures, and a still camera's fit jittered up to 0.08 degrees and walked. Hence the gate at a gain of 0.10 and at 0.1 degree. With it, about a minute live: 0 turns on all three, gains at most 0.021, card 2.6 to 3.6 ms a measurement, once a second per camera, correlation L 0.71, R 0.80, D 0.55.
+
+**Failures on the way:**
+
+| What | Result | What it taught |
+| --- | --- | --- |
+| Night reference against morning frames, someone in view | L 0.03 deg, correct. D a false 4.4 deg at 0.038 where no turn scored 0.100. R -10.06, correlation 0.134 | a reference must share the light; a turn must beat no turn |
+| Map's confidence as the judge, D-L, neither moved | as solved 16.38 %, 1.5 deg off 16.66, 3 deg off 18.35, 6 deg off 17.82, -3 deg 16.53 | **with someone in view the map's score says nothing about geometry**; 18.60 % held only for the empty room |
+| The star fix as the yardstick | R -11.31 where the LED's own pixels give -9.51 exactly (arithmetic): a small-angle solver, tested to 4 degrees | not a reference beyond a few degrees |
+| The live star tracker on a still rig | L 33, 77 px, R 109, 23 px, D lost; the same pixels with no memory L 0.46, -0.78, R -0.07, 0.18, D 2.2, 0.08, and the kernel held all three | **each fix searched around the last: a lock. A hidden light walked it off and it called that a move.** Log only now, no memory |
+
+## Do L and R agree through D? (2026-11-03 06:27 to 06:37)
+
+`out/host/vt_agree`, on saved exposures, the lane model. For each of D's pixels the depth is found from D and R alone, and again from D and L alone. They share only D's picture, so they agree only if both really are where the geometry says relative to D, and it is the same question whoever is in the room. Differences are in steps of 0.0179 per metre, one of the original 64 planes. Chance: the same depths paired with unrelated pixels.
+
+| Frames, planes | Sure from each alone | Median steps apart | Within 1 step | Chance | Within 2, of all textured |
+| --- | --- | --- | --- | --- | --- |
+| Empty room, 64 | 909 of 8,907 | 1.3 | 39.9 % | 16.8 % | 519 |
+| Empty room, 256 | 1,254 | 1.0 | 50.1 % | 21.2 % | 845 |
+| Empty room, 256, 11 x 11 window | 1,168 | 0.8 | 59.2 % | 30.5 % | 947 |
+| Morning, someone in view, 64 | 1,016 of 31,876 | 14.4 | 7.2 % | 3.2 % | 131 |
+| Morning, 256 | 1,400 | 16.4 | 5.6 % | 3.1 % | 202 |
+
+**The map has only ever worked on one near object.** By region of D's picture, in the empty room the pixels that agree are the near chair, at 1.92 against 1.95 m; the far wall at the top reads 0.83 against 4.04 m and 1.29 against 4.42 m. Every good number before this section came from that one object. With someone in view, nothing agrees much anywhere: the map today is mostly speckle.
+
+**Three causes found, none yet the whole answer:**
+
+| Cause | Evidence | State |
+| --- | --- | --- |
+| Too few planes. D is 0.83 and 0.77 m from R and L, so 0.8 to 8 m spans up to 255 and 367 pixels at level 2: 64 planes is 4.05 and 5.82 pixels a plane, past the true match | 519 to 845 agreed pixels at 256 planes, empty room | not live: 256 planes would add about 28 ms to each map (arithmetic), which the budget below does not have |
+| "A different depth" was 1.5 planes, whatever the count, so more planes read as more doubt | 512 planes: 2,517 sure, 5,870 after, same frames | fixed; unchanged at 64 planes, hash the same |
+| D's pose. Moved until R and L agree, by coordinate descent on that count: 177 to 389 on its own exposure, **80 to 162 on one held back**, within 1 step 8.9 % against 3.5 % chance. fd 1363.5, about 1.2 degrees | real, and small | not installed: too little agreement to trust. The same search on R gained nothing held back (80 to 86) |
+
+**R's re-anchored pose cannot be judged on these frames:** the empty-room pixels that make a known-depth yardstick are on the chair, which has moved, so even D+L, which did not move, misses them.
+
+## Optical flow resolution, against the real card (2026-11-03 06:44 to 06:57)
+
+The user's direction: double it until the frame rate drops. Flow is the still pictures' vectors, at a pyramid level set at run time (`flow N` to `out/run/view.cmd`, `--flow N`). The map and the attitude kernel stay at level 2, reduced from it. `logs/live/depth-*.csv`; rates from each camera's frame counter over the run; latency and drops from the panel, one reading each.
+
+| Flow | Cells, L and R / D | Over | Frames/s L, R, D | Worst 5 s window | Maps/s | Vectors L, us | "Mean" L, us | Capture to result, median, p95 ms | Dropped |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| Level 2, 480 x 270 | 1,020 / 460 | 25 s | 31.0, 31.0, 15.6 | | 15.6 | 399 | 508 | 33.2, 36.7 | 0 |
+| Level 1, 960 x 540 | 4,080 / 1,800 | 25 s | 30.3, 30.4, 15.2 | | 15.2 | 1,448 | 1,648 | 35.4, 36.0 | 0 |
+| **Level 0, native** | **16,200 / 7,200** | **75 s** | **30.2, 30.2, 15.1** | **29.6, 29.8, 15.0** | **15.1** | **4,515** | **5,825** | **47.5, 51.4** | **0** |
+| Native, cells half as tall | 32,400 / 14,400 | 38 s | **16.8, 25.7, 7.3** | 12.8, 20.2, 4.2 | **7.3** | 8,285 | 11,101 | **371.9, 382.3** | **1,651** |
+
+The rates over 25 s read a little high: wall time in that log is whole seconds. **Native holds and the next doubling collapses,** so native is the default. Level 0 is about 873 ms of the session's thread a second (arithmetic: 30 x 10.3 x 2, and 15 x (5.3 + 10.5) for D and its map).
+
+**That ceiling may be this code rather than the card.** "Mean" nearly doubled when the cells doubled with the same pixels, so about 5.3 of its 5.8 ms scale with cells and 0.5 with pixels (arithmetic). That points at `still_decide`, which runs on one thread. It has not been timed apart, or moved onto the team.
+
+**The motion gate is too quick at finer levels.** R's cells called moving: 3.5 % at level 2, 10.4 % at level 1, 22.8 % at native, with someone in view. Scaling `motion_px` with the level did not help (still 21 to 23 %), so a vector is not what triggers it; R's averaging falls to about 76 frames of 128. Unsolved. A panel reading of D's rate at native showed 13.8 against 15.1 from the counters: unexplained.
+
+**Found on the way:** `vtrackd.sh stop` waited a fixed second for the card program to end. Under the overloaded test it took longer, the new binary was refused as "Text file busy", and `live.sh` exited, leaving the old window and program running, whose log then looked like a measurement of the new build. It now waits for the program to end, and a failed start no longer ends `live.sh`.
+
+**All gates on this build:** `scripts/check.sh`, `logs/check/20261103-065625.txt`: 36 passed, 0 failed, 0 skipped, with the attitude kernel over real frames card = host. The gate runs the flow at level 2, as `vt_m3` always has; native flow on the card is measured live, as above, not by a hash.
+
+**R re-anchored after the knock**, once, by landmarks carried from the old R picture to the new by correlation (`--transfer`, `--solve-r`): wall points correlate 0.66 to 0.985 from night to day. Tilt -0.274, pan -9.222, roll -0.369 degrees, 2.19 px rms over 9 points at 4.0 to 4.8 m. The landmarks then land 14.9 mm from where they were, which restates the residual and is not independent; near objects are untested, and any move of R's centre is unmeasured. D was not moved at all: its landmarks are where they were.

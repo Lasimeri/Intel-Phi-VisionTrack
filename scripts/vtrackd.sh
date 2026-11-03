@@ -26,7 +26,16 @@ case "${1:-}" in
         ;;
     stop)
         "$vt_root/out/host/vt_quit" || true
-        sleep 1
+        # It finishes its session first, which under load takes seconds. A new binary over a running one is refused: "Text file busy".
+        for _ in {1..40}; do
+            [[ -z $(phic run sh -c 'pgrep vtrackd' 2>/dev/null || true) ]] && break
+            sleep 0.5
+        done
+        if [[ -n $(phic run sh -c 'pgrep vtrackd' 2>/dev/null || true) ]]; then
+            echo "vtrackd.sh: still running 20 s after being asked: stopping it" >&2
+            phic run sh -c 'pkill vtrackd' >/dev/null 2>&1 || true
+            sleep 1
+        fi
         if [[ -f $state/hugepages.was ]]; then
             base=$(cat "$state/hugepages.was")
             phic run sh -c "echo $base > /proc/sys/vm/nr_hugepages" >/dev/null

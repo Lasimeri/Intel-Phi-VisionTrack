@@ -271,8 +271,10 @@ void depth_decide(struct depth *d, int tid, int n)
     float *base = (float *)(void *)(d->scratch + (size_t)tid * d->scratch_each);
     const int lanes = d->stride + 2 * BOX_PAD;
     float *best_a = base, *idx_a = base + lanes, *sec_a = base + 2 * lanes, *cm_a = base + 3 * lanes, *cp_a = base + 4 * lanes, *inb_a = base + 5 * lanes;
-    const float big VX_ALIGNED = 1e30f, halfthree VX_ALIGNED = 1.5f;
-    const vxf vbig = vx_bcast(&big), v15 = vx_bcast(&halfthree);
+    /* "A different depth" as a distance in inverse depth, not a count of planes: 1.5 of 64. With planes packed more densely a neighbour is the same match seen again, and would read as doubt: 512 planes halved the
+     * pixels that were sure, on the same frames. */
+    const float big VX_ALIGNED = 1e30f, apart VX_ALIGNED = (float)(1.5L * (real)c->planes / 64.0L);
+    const vxf vbig = vx_bcast(&big), v15 = vx_bcast(&apart);
     /* A plane is evidence only where its aggregated cost is under what a window full of out-of-image or saturated samples costs. Measured on the real room: a door L never saw got a confident depth, the few
      * planes that landed inside L winning by default against all the planes that did not. */
     float weight_sum = 0.0f;

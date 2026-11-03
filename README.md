@@ -16,7 +16,7 @@ Built on [Intel-Phi-7120A](https://github.com/Lasimeri/Intel-Phi-7120A) and [Int
 | M2 optical-flow tracking | **kernel and tracking run on the card**, including reacquisition after full occlusion | [measurements](docs/measurements.md) |
 | M3 stereo reconstruction | **runs on the card, 1 to 2 mm RMSE on synthetic scenes**; ambiguity reported, gate fires | [measurements](docs/measurements.md) |
 | M4 temporal state estimation | **runs on the card**; covariance not calibrated | [measurements](docs/measurements.md) |
-| M5 live visualization, integration | **three cameras and a depth map live on the card** (L + R 1080p30, D 720p15; 15.9 maps/s at 9.8 ms, 18.41 % of textured pixels confident); LED star tracker live; the card's vectors gate the depth map's averaging; **geometry solved from the real room and judged correct by the user's eye, no measured ground truth; two cameras since knocked, so it is being solved again; geometry not yet adjusted from motion** | [measurements](docs/measurements.md) |
+| M5 live visualization, integration | **three cameras and a depth map live on the card** (L + R 1080p30, D 720p15; 15.9 maps/s at 9.8 ms, 18.41 % of textured pixels confident); LED star tracker live; the card's vectors gate the depth map's averaging; optical flow at native resolution (16,200 cells for L and R, the finest that holds on one card); each camera's turn measured constantly on the card from its own picture, with no lock, carrying the geometry; **the map is not yet right: L and R mostly do not agree through D except on one near object; no measured ground truth; a real knock not yet seen live** | [measurements](docs/measurements.md) |
 | M6 optimization, validation | partial | [limitations](docs/limitations.md) |
 
 Open items: [limitations](docs/limitations.md). Design: [architecture](docs/architecture.md).
@@ -50,6 +50,17 @@ out/host/vt_stars build input/calib/stars-l.txt A.pgm B.pgm 6     # per camera; 
 ```
 
 `--report` is not optional: a low rms says nothing about whether the 3D is physically sane ([limitations](docs/limitations.md)).
+
+After that the card holds it by itself ([architecture](docs/architecture.md)): one line a second per camera in `logs/live/attitude-*.csv`. To look at it, or to re-anchor a camera that moved while nothing was running:
+
+```
+out/host/vt_attitude CALIB REF_PREFIX CUR_PREFIX [--out NEW.txt]             # PREFIX-{l,r,d}.pgm: how far each has turned, and the geometry carried
+out/host/vt_attitude --test CALIB PREFIX CAM TILT PAN ROLL [SECOND_PREFIX]   # a known turn of a real exposure, and what it recovers
+out/host/vt_attitude --transfer CALIB OLD NEW POINTS OUT TILT PAN [ROLL [FLOOR]]   # landmarks carried from R's old picture to its new, by correlation
+out/host/vt_attitude --solve-r CALIB OLD_POINTS NEW_POINTS OUT               # R's turn from them; L, D and the lenses held
+out/host/vt_agree CALIB PREFIX [--planes N] [--agg R] [--grid 1] [--dump OUT]  # do R and L, each referred to D, arrive at the same depth? The honest judge of the map
+echo 'flow 0' > out/run/view.cmd                                             # optical flow at pyramid level 0 (native), 1 or 2: a new session on the card
+```
 
 The depth map runs by itself in the live window once `current.txt` holds all three cameras. To look at it closely, from the desktop host:
 

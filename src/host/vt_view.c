@@ -27,11 +27,11 @@
 #include <time.h>
 #include <unistd.h>
 
+#include "attitude.h"
 #include "calib.h"
 #include "dataset.h"
 #include "depthview.h"
 #include "plane.h"
-#include "rigwatch.h"
 #include "stars.h"
 #include "v4l2cap.h"
 #include "vt_link.h"
@@ -80,22 +80,20 @@ struct cam {
     /* An integrated snapshot under way: the sum of the frames so far. */
     uint32_t *sum;
     int integ_n, integ_left;
-    /* Has this camera moved: rigwatch.h. */
-    float *rig_hist[RIG_HIST], *rig_now, *rig_scratch;
-    uint8_t *rig_mask;
-    int rig_n, rig_unsure;
-    time_t rig_moved;
-    /* Its fixed lights: stars.h. */
+    /* Its fixed lights, a check only: stars.h. They do not carry the geometry and cannot turn the map off: a search around the last fix is a lock, and a light hidden by someone walked it off to something
+     * else, which read as the camera moving (2026-11-03: 109 px on a camera that had not moved, 0.07 px on the same pixels with no memory). */
     struct star_cat cat;
     struct star_fix fix;
     uint16_t *star16;
     uint32_t *star_sum;
-    double star_hx, star_hy;   /* where the last fix left the lights */
-    double att[3];             /* the attitude last seen: it coasts while the lights are hidden */
-    double att_applied[3];     /* what the geometry has been corrected for */
+    /* How far it has turned, from the card's attitude kernel. */
+    double q_now[4];           /* since this session's first picture */
+    double q_file[4];          /* at the moment the geometry on file was true */
+    double att_applied[3];     /* the rotation vector the geometry has been carried through, from the file's */
     int att_pending;
+    int lost_run;              /* seconds the camera has not been able to find itself in its reference */
     /* All of the above belongs to the navigation thread. This is what the window may see of it, under A.m. */
-    struct nav_view { int used, known, unsure; double gdop, att[2]; time_t moved; } nav;
+    struct nav_view { int used, known, state, lost; double gdop, turned[3]; float corr, corr_none; uint32_t keys; } nav;
 };
 
 static struct {
@@ -118,7 +116,7 @@ static struct {
     double trail[TRAIL][3];
     int trail_n, trail_i;
     /* The depth map: the link thread fills the buffer that is not current, and only then makes it current. */
-    int map_i, depth_avg, depth_planes, vectors_all, save_map;
+    int map_i, depth_avg, depth_planes, vectors_all, save_map, flow_level, session_restart;
     uint64_t map_seq;
     struct rate map_rate;
 } A;
@@ -257,8 +255,10 @@ static void session_config(struct vt_config *c)
         c->depth_tex = 2.0f * VT_Q6;
         c->depth_conf = 0.05f;
         c->depth_eps = 1.0f * VT_Q6;
-        c->motion_px = 0.25f;
+        /* A quarter of a pixel at level 2, the same distance in the world at any level: at native flow an unscaled limit called 22 % of R's still cells moving. */
+        c->motion_px = 0.25f * (float)(1 << (VT_DEPTH_LEVEL - A.flow_level));
         c->motion_grey = 2.0f;
+        c->flow_level = (uint32_t)A.flow_level;
     }
 }
 
@@ -311,6 +311,12 @@ static void *link_main(void *arg)
             A.link_state = LINK_PAUSED;
             usleep(100000);
             continue;
+        }
+        /* The order "flow N": a new session on the card, at that level. */
+        if (active && __atomic_exchange_n(&A.session_restart, 0, __ATOMIC_ACQ_REL)) {
+            vt_session_end(&A.l);
+            vt_session_wait_end(&A.l, 2.0);
+            active = 0;
         }
         if (!active) {
             struct vt_config cfg;
@@ -790,17 +796,20 @@ static void apply_command_file(void)
         start_snapshot(want > 0 && want <= 1 << 16 ? want : 1);
     } else if (!strncmp(line, "map", 3)) {
         A.save_map = 1;
+    } else if (sscanf(line, "flow %d", &n) == 1 && n >= 0 && n <= VT_DEPTH_LEVEL) {
+        A.flow_level = n;
+        __atomic_store_n(&A.session_restart, 1, __ATOMIC_RELEASE);
     }
     pthread_mutex_unlock(&A.m);
     fprintf(stderr, "vt_view: command file: %s", line);
 }
 
 #define STAR_AVG_FRAMES 16
-#define STAR_CARRY_MIN 3      /* lights in agreement, for geometry to follow them */
-#define STAR_CARRY_RMS 0.7    /* pixels */
-#define STAR_MOVED_PX 15.0    /* far above what blur and noise did to a light */
-#define ATT_APPLY_RAD (0.03 * M_PI / 180.0) /* a change the lights must show twice running before the geometry follows it: above their single-frame noise */
-#define ATT_STALE_RAD (5.0 * M_PI / 180.0)  /* more than this and the camera has likely moved as well as turned: a rotation cannot carry the geometry */
+#define ATT_APPLY_RAD (0.03 * M_PI / 180.0) /* a change the kernel must show twice running before the geometry follows it */
+#define ATT_LOST_TICKS 5     /* seconds without a good answer before the geometry is called lost */
+#define ATT_LOST_VIEW 0.25f  /* of the reference still in view */
+#define ATT_LOST_CORR 0.2f   /* the picture against its reference */
+#define ATT_KEEP_TICKS 10    /* seconds a carried geometry must hold still before it goes on file */
 
 /* The geometry as it holds now: what was solved, carried through each camera's attitude: star_correct_pair. */
 static void geometry_from_attitudes(void)
@@ -820,13 +829,12 @@ static void geometry_from_attitudes(void)
     pthread_mutex_unlock(&A.m);
 }
 
-/* Once a second, each camera: a fix against its fixed lights. Lights hidden, the attitude coasts: they are in view most of the time, not all of it. */
+/* Once a second, each camera: a fix against its fixed lights, for the log and the panel. Each from the catalogue itself, with no memory of the last one. */
 static void star_tick(void)
 {
     static unsigned tick;
     static FILE *csv;
     tick++;
-    int changed = 0;
     for (int k = 0; k < A.ncam; k++) {
         struct cam *K = &A.c[k];
         const uint64_t cap = __atomic_load_n(&K->captured, __ATOMIC_ACQUIRE);
@@ -861,7 +869,7 @@ static void star_tick(void)
             K->star16[i] = (uint16_t)(K->star_sum[i] * scale / divide);
         const double f = k == 0 ? A.calib_base.fa : k == 1 ? A.calib_base.fb : A.calib_base.fd;
         /* A whole-frame search only now and then: it costs tens of milliseconds, and a light behind the user is no reason to spend them every second. */
-        star_track(&K->cat, K->star16, K->w, K->h, f > 1.0 ? f : (double)K->w, K->star_hx, K->star_hy, (tick & 7u) == 0, &K->fix);
+        star_track(&K->cat, K->star16, K->w, K->h, f > 1.0 ? f : (double)K->w, 0.0, 0.0, (tick & 7u) == 0, &K->fix);
         const struct star_fix *x = &K->fix;
         if (!csv) {
             char path[80];
@@ -877,96 +885,134 @@ static void star_tick(void)
             fprintf(csv, "%lld,%c,%d,%d,%d,%d,%.3f,%.3f,%.4f,%.4f,%.4f,%.3f,%.4f\n", (long long)time(NULL), "LRD"[k], x->known, x->seen, x->used, x->lost_in_space, x->dx, x->dy, x->wx * 180.0 / M_PI, x->wy * 180.0 / M_PI, x->wz * 180.0 / M_PI, x->rms_px, x->gdop);
             fflush(csv);
         }
-        if (!x->used)
-            continue; /* coasting */
-        K->star_hx = x->dx;
-        K->star_hy = x->dy;
-        K->att[0] = x->wx;
-        K->att[1] = x->wy;
-        K->att[2] = x->wz;
-        const double d0 = K->att[0] - K->att_applied[0], d1 = K->att[1] - K->att_applied[1], d2 = K->att[2] - K->att_applied[2];
-        /* A shift of the lights no focus change or noise explains: measured on one blurred LED, 3.9 px off with 1.3 px of jitter. The geometry is then stale, and says so. */
-        if (sqrt(K->att[0] * K->att[0] + K->att[1] * K->att[1] + K->att[2] * K->att[2]) > ATT_STALE_RAD || sqrt(x->dx * x->dx + x->dy * x->dy) > STAR_MOVED_PX) {
-            if (!K->rig_moved || time(NULL) - K->rig_moved > 5)
-                fprintf(stderr, "vt_view: stars: camera %c MOVED: lights shifted %+.1f %+.1f px\n", "LRD"[k], x->dx, x->dy);
-            K->rig_moved = time(NULL);
+    }
+}
+
+/* The rotation vector of a quaternion, w x y z. */
+static void q_to_vector(const double *q, double *v)
+{
+    const double s = sqrt(q[1] * q[1] + q[2] * q[2] + q[3] * q[3]);
+    const double k = s > 1e-12 ? 2.0 * atan2(s, q[0]) / s : 2.0;
+    v[0] = q[1] * k;
+    v[1] = q[2] * k;
+    v[2] = q[3] * k;
+}
+
+/* The carried geometry onto the file, so a restart does not fall back to a pose the rig has left. The file then is the truth, and the turns start again from here. */
+static void keep_on_file(void)
+{
+    pthread_mutex_lock(&A.m);
+    const struct vt_calib now = A.calib;
+    pthread_mutex_unlock(&A.m);
+    static const char note[] = "carried by the attitude kernel from the solved geometry";
+    const char *tmp = CALIB_PATH ".new";
+    struct stat st;
+    if (calib_write(tmp, &now, note) || rename(tmp, CALIB_PATH) || stat(CALIB_PATH, &st)) {
+        fprintf(stderr, "vt_view: the carried geometry could not be kept on file\n");
+        return;
+    }
+    pthread_mutex_lock(&A.m);
+    A.calib_base = now;
+    A.calib_mtime = st.st_mtime;
+    snprintf(A.calib_note, sizeof A.calib_note, "%s", note);
+    for (int k = 0; k < A.ncam; k++) {
+        memcpy(A.c[k].q_file, A.c[k].q_now, sizeof A.c[k].q_file);
+        memset(A.c[k].att_applied, 0, sizeof A.c[k].att_applied);
+    }
+    pthread_mutex_unlock(&A.m);
+    fprintf(stderr, "vt_view: the carried geometry kept on file\n");
+}
+
+/* Once a second: each camera's turn as the card's attitude kernel last measured it, carried into the geometry. It holds nothing, so it cannot be walked off: each answer comes from the whole picture again. */
+static void attitude_tick(void)
+{
+    static uint64_t last_seq;
+    static FILE *csv;
+    static int unkept, steady;
+    struct vt_motion mo[VT_MAX_CAMERAS];
+    uint64_t seq = 0;
+    pthread_mutex_lock(&A.m);
+    if (A.map_seq) {
+        const struct vt_depth_out *h = (const void *)map_store[A.map_i];
+        memcpy(mo, h->cam, sizeof mo);
+        seq = h->seq;
+    }
+    pthread_mutex_unlock(&A.m);
+    if (!seq || !A.calib_base.valid)
+        return;
+    int changed = 0;
+    /* A new session on the card: its first picture is a new origin. The geometry on file holds. */
+    if (seq < last_seq) {
+        for (int k = 0; k < A.ncam; k++) {
+            static const double one[4] = {1.0, 0.0, 0.0, 0.0};
+            memcpy(A.c[k].q_file, one, sizeof one);
+            memcpy(A.c[k].q_now, one, sizeof one);
+            memset(A.c[k].att_applied, 0, sizeof A.c[k].att_applied);
+        }
+        changed = 1;
+        unkept = 0;
+    }
+    last_seq = seq;
+    if (!csv) {
+        char path[80];
+        const time_t wall = time(NULL);
+        struct tm tm;
+        localtime_r(&wall, &tm);
+        strftime(path, sizeof path, "logs/live/attitude-%Y%m%d-%H%M%S.csv", &tm);
+        csv = fopen(path, "w");
+        if (csv)
+            fprintf(csv, "wall_s,camera,state,tilt_deg,pan_deg,roll_deg,corr,corr_none,used,view,peak_z,keys,card_ms,stars_used,stars_dx,stars_dy\n");
+    }
+    for (int k = 0; k < A.ncam; k++) {
+        struct cam *K = &A.c[k];
+        const struct vt_motion *m = &mo[k];
+        if (m->att_state == VT_ATT_NONE) {
+            K->lost_run = 0;
             continue;
         }
-        /* Carried only on a real attitude: at least three lights that agree. Fewer can raise the alarm above but cannot correct: one blurred LED's offset looked exactly like a 0.12 degree pan, two lights made a false 0.65 degree roll. */
-        if (x->used < STAR_CARRY_MIN || x->rms_px > STAR_CARRY_RMS) {
-            K->att_pending = 0;
-            continue;
-        }
+        memcpy(K->q_now, m->att_q, sizeof K->q_now);
+        /* Since the file's moment: now, after undoing the file's. */
+        const double back[4] = {K->q_file[0], -K->q_file[1], -K->q_file[2], -K->q_file[3]};
+        double rel[4], v[3];
+        att_q_mul(K->q_now, back, rel);
+        q_to_vector(rel, v);
+        const double d0 = v[0] - K->att_applied[0], d1 = v[1] - K->att_applied[1], d2 = v[2] - K->att_applied[2];
         if (sqrt(d0 * d0 + d1 * d1 + d2 * d2) > ATT_APPLY_RAD) {
             if (K->att_pending++) {
-                memcpy(K->att_applied, K->att, sizeof K->att);
+                memcpy(K->att_applied, v, sizeof v);
                 K->att_pending = 0;
                 changed = 1;
-                fprintf(stderr, "vt_view: stars: camera %c turned: tilt %+.3f pan %+.3f roll %+.3f deg, %d lights: geometry carried\n", "LRD"[k], x->wx * 180.0 / M_PI, x->wy * 180.0 / M_PI, x->wz * 180.0 / M_PI, x->used);
+                unkept = 1;
+                steady = 0;
+                fprintf(stderr, "vt_view: attitude: camera %c turned tilt %+.3f pan %+.3f roll %+.3f deg, correlation %.3f: geometry carried\n", "LRD"[k], v[0] * 180.0 / M_PI, v[1] * 180.0 / M_PI, v[2] * 180.0 / M_PI, (double)m->att_corr);
             }
         } else {
             K->att_pending = 0;
         }
+        const float corr = m->att_state == VT_ATT_TURNED ? m->att_corr : m->att_corr_none;
+        const int good = m->att_view >= ATT_LOST_VIEW && corr >= ATT_LOST_CORR;
+        const int was_lost = K->lost_run >= ATT_LOST_TICKS;
+        K->lost_run = good ? 0 : K->lost_run + 1;
+        if (!was_lost && K->lost_run >= ATT_LOST_TICKS)
+            fprintf(stderr, "vt_view: attitude: camera %c cannot find itself: correlation %.3f, %.2f in view\n", "LRD"[k], (double)corr, (double)m->att_view);
+        if (csv)
+            fprintf(csv, "%lld,%c,%u,%.4f,%.4f,%.4f,%.4f,%.4f,%.3f,%.3f,%.1f,%u,%.3f,%d,%.2f,%.2f\n", (long long)time(NULL), "LRD"[k], m->att_state, v[0] * 180.0 / M_PI, v[1] * 180.0 / M_PI, v[2] * 180.0 / M_PI, (double)m->att_corr, (double)m->att_corr_none, (double)m->att_used, (double)m->att_view, (double)m->att_peak_z, m->att_keys, (double)m->cycles_att * 1e3 / TSC_HZ, K->fix.used, K->fix.dx, K->fix.dy);
     }
-    if (changed && A.calib_base.valid)
+    if (csv)
+        fflush(csv);
+    if (changed)
         geometry_from_attitudes();
-}
-
-/* Once a second, a camera with no lights to go by: the newest frame against its own recent past. A move restarts its history, and is told to the log and the panel: geometry solved before it no longer describes this rig. */
-static void rig_tick(void)
-{
-    for (int k = 0; k < A.ncam; k++) {
-        struct cam *K = &A.c[k];
-        const uint64_t cap = __atomic_load_n(&K->captured, __ATOMIC_ACQUIRE);
-        if (!cap)
-            continue;
-        /* A camera with a fix knows far better than this can, and this is measured to false-alarm on a dim camera. */
-        if (K->fix.used) {
-            K->rig_unsure = 0;
-            continue;
-        }
-        const int tw = K->w / RIG_CELL, th = K->h / RIG_CELL;
-        const size_t cells = (size_t)tw * (size_t)th;
-        if (!K->rig_scratch) {
-            for (int i = 0; i < RIG_HIST; i++)
-                K->rig_hist[i] = malloc(sizeof(float) * cells);
-            K->rig_now = malloc(sizeof(float) * cells);
-            K->rig_scratch = malloc(sizeof(float) * cells);
-            K->rig_mask = malloc(cells);
-            K->rig_unsure = 1;
-        }
-        /* While the history fills, the new thumbnail joins it; once full, it is compared first and joins it after. */
-        float *now = K->rig_n < RIG_HIST ? K->rig_hist[K->rig_n] : K->rig_now;
-        rig_thumb(K->ring + ((cap - 1) % RING) * (uint64_t)K->w * (uint64_t)K->h, K->w, K->h, now);
-        if (K->rig_n < RIG_HIST) {
-            K->rig_n++;
-            if (K->rig_n == RIG_HIST)
-                fprintf(stderr, "vt_view: rig: camera %c history complete\n", "LRD"[k]);
-            continue;
-        }
-        rig_stable_mask((const float *const *)K->rig_hist, RIG_HIST, tw, th, K->rig_scratch, K->rig_mask);
-        struct rig_compare c;
-        rig_compare(K->rig_hist[0], K->rig_mask, now, tw, th, K->rig_scratch, &c);
-        K->rig_unsure = c.cells < RIG_MIN_CELLS;
-        if (c.moved) {
-            K->rig_moved = time(NULL);
-            K->rig_n = 0;
-            fprintf(stderr, "vt_view: rig: camera %c MOVED: mismatch %.2f at no shift, %.2f at %+d %+d px, %d cells\n", "LRD"[k], (double)c.at_zero, (double)c.best, c.dx, c.dy, c.cells);
-            continue;
-        }
-        /* Roll: the new thumbnail joins the end, the oldest buffer takes the next one. */
-        float *oldest = K->rig_hist[0];
-        for (int i = 1; i < RIG_HIST; i++)
-            K->rig_hist[i - 1] = K->rig_hist[i];
-        K->rig_hist[RIG_HIST - 1] = now;
-        K->rig_now = oldest;
+    if (unkept && ++steady >= ATT_KEEP_TICKS) {
+        keep_on_file();
+        unkept = 0;
+        steady = 0;
     }
 }
 
-/* Geometry solved before a primary camera last moved describes a rig that no longer exists. With A.m held. */
-static int calib_stale(void)
+/* A camera that has not been able to find itself: its geometry is not known to hold. With A.m held. L and R make the 3D point; the map needs D as well. */
+static int calib_lost_pair(void)
 {
-    return A.calib.valid && (A.c[0].nav.moved > A.calib_mtime || A.c[1].nav.moved > A.calib_mtime);
+    return A.calib.valid && (A.c[0].nav.lost || A.c[1].nav.lost);
 }
 
 static void load_calibration(void)
@@ -1020,6 +1066,14 @@ static void load_calibration(void)
     A.trail_n = 0;
     memcpy(A.calib_note, note, sizeof note);
     pthread_mutex_unlock(&A.m);
+    /* A geometry and its catalogues are one pose: the catalogues are read again. The turns count from here. */
+    for (int k = 0; k < A.ncam; k++) {
+        struct cam *K = &A.c[k];
+        K->cat.n = 0;
+        memset(&K->fix, 0, sizeof K->fix);
+        memcpy(K->q_file, K->q_now, sizeof K->q_file);
+        K->att_pending = K->lost_run = 0;
+    }
     fprintf(stderr, "vt_view: calibration loaded: fa %.1f fb %.1f baseline %.3f m\n", c.fa, c.fb, sqrt(c.T[0] * c.T[0] + c.T[1] * c.T[1] + c.T[2] * c.T[2]));
 }
 
@@ -1030,14 +1084,20 @@ static void *nav_main(void *arg)
     (void)arg;
     struct timespec next;
     clock_gettime(CLOCK_MONOTONIC, &next);
+    for (int k = 0; k < A.ncam; k++)
+        A.c[k].q_now[0] = A.c[k].q_file[0] = 1.0;
     while (!A.quit) {
         load_calibration();
         star_tick();
-        rig_tick();
+        attitude_tick();
         pthread_mutex_lock(&A.m);
+        struct vt_motion mo[VT_MAX_CAMERAS];
+        const int have = A.map_seq != 0;
+        if (have)
+            memcpy(mo, ((const struct vt_depth_out *)(const void *)map_store[A.map_i])->cam, sizeof mo);
         for (int k = 0; k < A.ncam; k++) {
             struct cam *K = &A.c[k];
-            K->nav = (struct nav_view){K->fix.used, K->fix.known, K->rig_unsure, K->fix.gdop, {K->att[0], K->att[1]}, K->rig_moved};
+            K->nav = (struct nav_view){K->fix.used, K->fix.known, have ? (int)mo[k].att_state : VT_ATT_NONE, K->lost_run >= ATT_LOST_TICKS, K->fix.gdop, {K->att_applied[0], K->att_applied[1], K->att_applied[2]}, have ? mo[k].att_corr : 0.0f, have ? mo[k].att_corr_none : 0.0f, have ? mo[k].att_keys : 0u};
         }
         pthread_mutex_unlock(&A.m);
         next.tv_sec++;
@@ -1078,6 +1138,8 @@ int main(int argc, char **argv)
     A.view_level = -1;
     A.depth_avg = 128;
     A.depth_planes = 64;
+    /* Native: the finest that holds on one card (2026-11-03, measured). 30, 30 and 15 frames a second, 0 dropped; doubling the cells again gave 17, 26 and 7. docs/measurements.md. */
+    A.flow_level = 0;
     int at_x = -1, at_y = -1;
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--dev") && i + 1 < argc) a->dev = argv[++i];
@@ -1097,6 +1159,7 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--levels") && i + 1 < argc) A.levels = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--feat") && i + 1 < argc) A.feat = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--avg") && i + 1 < argc) A.depth_avg = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--flow") && i + 1 < argc) A.flow_level = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--planes") && i + 1 < argc) A.depth_planes = atoi(argv[++i]);
         else {
             fprintf(stderr, "vt_view: unknown option %s\n", argv[i]);
@@ -1250,7 +1313,7 @@ int main(int argc, char **argv)
         const uint64_t dropped = A.dropped, exc = A.exceptions, card_build = A.card_build, pairs = A.pairs;
         const int view_level = A.view_level, contrast = A.contrast, pre_gauss = A.pre_gauss, feat = A.feat;
         const struct vt_calib calib = A.calib;
-        const int stale = calib_stale();
+        const int stale = calib_lost_pair(), map_lost = stale || A.c[2].nav.lost;
         struct nav_view nav[VT_MAX_CAMERAS];
         char calib_note[sizeof A.calib_note];
         for (int k = 0; k < A.ncam; k++)
@@ -1322,7 +1385,7 @@ int main(int argc, char **argv)
         }
         if (A.ncam == 3) {
             x11view_fill(&v, depth_pane.x, depth_pane.y, depth_pane.w, depth_pane.h, 0x0c0c0cu);
-            const int live = tracking && map && calib.valid && calib.valid_d && !stale;
+            const int live = tracking && map && calib.valid && calib.valid_d && !map_lost;
             if (live) {
                 const struct vt_depth_out *h = map;
                 dv_pane(&v, map, depth_pane.x, depth_pane.y, depth_pane.w, depth_pane.h, A.mirror);
@@ -1332,7 +1395,7 @@ int main(int argc, char **argv)
                 text_outlined(&v, depth_pane.x + 10, depth_pane.y + 10, 2, WHITE, t);
             } else {
                 x11view_text(&v, depth_pane.x + 10, depth_pane.y + 10, 2, WHITE, "DEPTH MAP, FROM VIEW D");
-                x11view_text(&v, depth_pane.x + 10, depth_pane.y + 34, 2, GREY, !calib.valid || !calib.valid_d ? "UNAVAILABLE: no geometry holds camera D" : !tracking ? "UNAVAILABLE: card not tracking" : !map ? "waiting for the card's first map" : "UNAVAILABLE: GEOMETRY STALE");
+                x11view_text(&v, depth_pane.x + 10, depth_pane.y + 34, 2, GREY, !calib.valid || !calib.valid_d ? "UNAVAILABLE: no geometry holds camera D" : !tracking ? "UNAVAILABLE: card not tracking" : !map ? "waiting for the card's first map" : "UNAVAILABLE: A CAMERA CANNOT FIND ITSELF");
             }
         }
         if (dragging) {
@@ -1371,26 +1434,19 @@ int main(int argc, char **argv)
         panel_line(&v, &y, GREY, "frames dropped at the host %llu", (unsigned long long)dropped);
         {
             char rig[96];
-            int at = snprintf(rig, sizeof rig, "cameras:");
-            const time_t now_wall = time(NULL);
+            int at = snprintf(rig, sizeof rig, "attitude:");
             for (int k = 0; k < A.ncam && at < (int)sizeof rig; k++) {
-                if (nav[k].moved && now_wall - nav[k].moved < 30)
-                    at += snprintf(rig + at, sizeof rig - (size_t)at, " %c MOVED %llds ago", "LRD"[k], (long long)(now_wall - nav[k].moved));
-                else if (nav[k].unsure)
-                    at += snprintf(rig + at, sizeof rig - (size_t)at, " %c unsure", "LRD"[k]);
-                else
-                    at += snprintf(rig + at, sizeof rig - (size_t)at, " %c still", "LRD"[k]);
+                const float shown = nav[k].state == VT_ATT_TURNED ? nav[k].corr : nav[k].corr_none;
+                at += snprintf(rig + at, sizeof rig - (size_t)at, " %c %s %.2f", "LRD"[k], nav[k].lost ? "LOST" : nav[k].state == VT_ATT_TURNED ? "turned" : nav[k].state == VT_ATT_HELD ? "still" : "-", (double)shown);
             }
             panel_line(&v, &y, GREY, "%s", rig);
         }
         {
             char line[96], line2[96];
-            int at = snprintf(line, sizeof line, "lights:"), at2 = snprintf(line2, sizeof line2, "turned deg:");
+            int at = snprintf(line, sizeof line, "lights, a check:"), at2 = snprintf(line2, sizeof line2, "carried deg:");
             for (int k = 0; k < A.ncam; k++) {
                 at += snprintf(line + at, sizeof line - (size_t)at, " %c %d/%d", "LRD"[k], nav[k].used, nav[k].known);
-                if (nav[k].gdop > 0.0)
-                    at += snprintf(line + at, sizeof line - (size_t)at, " gdop %.3f", nav[k].gdop);
-                at2 += snprintf(line2 + at2, sizeof line2 - (size_t)at2, " %c%+.2f%+.2f", "LRD"[k], nav[k].att[0] * 180.0 / M_PI, nav[k].att[1] * 180.0 / M_PI);
+                at2 += snprintf(line2 + at2, sizeof line2 - (size_t)at2, " %c%+.2f%+.2f%+.2f", "LRD"[k], nav[k].turned[0] * 180.0 / M_PI, nav[k].turned[1] * 180.0 / M_PI, nav[k].turned[2] * 180.0 / M_PI);
             }
             panel_line(&v, &y, GREY, "%s", line);
             panel_line(&v, &y, GREY, "%s", line2);
@@ -1422,8 +1478,8 @@ int main(int argc, char **argv)
             panel_line(&v, &y, DIM, "correspondences so far: %llu", (unsigned long long)pairs);
         } else if (stale) {
             /* No number at all: a position computed through a pose the rig has left only looks like a measurement. */
-            panel_line(&v, &y, WHITE, "UNAVAILABLE: GEOMETRY STALE");
-            panel_line(&v, &y, GREY, "L or R moved after it was solved");
+            panel_line(&v, &y, WHITE, "UNAVAILABLE: L OR R CANNOT FIND ITSELF");
+            panel_line(&v, &y, GREY, "its picture no longer matches its reference");
         } else if (tracking && (m3->flags & VT_F_METRIC)) {
             const int measured = m3->age_s < 0.05;
             panel_line(&v, &y, measured ? WHITE : GREY, "%s, age %.0f ms", measured ? "MEASURED" : "PREDICTED, NOT MEASURED", m3->age_s * 1000.0);
@@ -1445,6 +1501,7 @@ int main(int argc, char **argv)
             panel_line(&v, &y, WHITE, "DEPTH %.1f maps/s  confident %.2f %% of %u textured", A.map_rate.value, h->textured ? 100.0 * (double)h->confident / (double)h->textured : 0.0, h->textured);
             panel_line(&v, &y, GREY, " %.1f %% of pixels have a depth", 100.0 * (double)h->known / ((double)h->w * (double)h->h));
             panel_line(&v, &y, GREY, " card ms: normalize %.1f sweep %.1f agg %.1f decide %.1f", (double)h->cycles_normalize * us, (double)h->cycles_sweep * us, (double)h->cycles_aggregate * us, (double)h->cycles_decide * us);
+            panel_line(&v, &y, GREY, " flow at level %u: L %u x %u cells", h->flow_level, h->cam[0].cols, h->cam[0].rows);
             panel_line(&v, &y, GREY, " vectors ms L %.1f R %.1f D %.1f  moving %u %u %u", (double)h->cam[0].cycles_vectors * us, (double)h->cam[1].cycles_vectors * us, (double)h->cam[2].cycles_vectors * us, h->cam[0].moving, h->cam[1].moving, h->cam[2].moving);
             panel_line(&v, &y, GREY, " frames in the means L %.0f R %.0f D %.0f", (double)h->cam[0].count_mean, (double)h->cam[1].count_mean, (double)h->cam[2].count_mean);
             panel_line(&v, &y, GREY, " drift, camera px: L %+.2f%+.2f R %+.2f%+.2f D %+.2f%+.2f", 4.0 * (double)h->cam[0].drift_u, 4.0 * (double)h->cam[0].drift_v, 4.0 * (double)h->cam[1].drift_u, 4.0 * (double)h->cam[1].drift_v, 4.0 * (double)h->cam[2].drift_u, 4.0 * (double)h->cam[2].drift_v);

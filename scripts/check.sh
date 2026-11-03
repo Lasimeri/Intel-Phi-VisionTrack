@@ -57,9 +57,9 @@ if [[ -f $m3_seq-0-d.pgm && -f $m3_one-d.pgm && -f input/calib/current.txt ]]; t
     phic put "$s/m3.bin" "$vt_card_dir/m3.bin" >/dev/null
     scripts/card_run.sh -p 256 vt_m3 "$vt_card_dir/m3.bin" 3 >"$s/m3c" || fail "vt_m3 exit"
     phic run rm -f "$vt_card_dir/m3.bin" >/dev/null
-    /usr/bin/grep -aE '^(depth_hash|still_hash|still_frame)' "$s/m3c" >"$s/m3cf" || true
-    /usr/bin/grep -aE '^(depth_hash|still_hash|still_frame)' "$s/m3h" >"$s/m3hf" || true
-    same "M3 still pictures and depth map over 9 real frames, card = host" 11 "$s/m3cf" "$s/m3hf"
+    /usr/bin/grep -aE '^(depth_hash|still_hash|still_frame|att_last|att_hash)' "$s/m3c" >"$s/m3cf" || true
+    /usr/bin/grep -aE '^(depth_hash|still_hash|still_frame|att_last|att_hash)' "$s/m3h" >"$s/m3hf" || true
+    same "M3 still pictures, attitude and depth map over 9 real frames, card = host" 15 "$s/m3cf" "$s/m3hf"
 else
     skip "M3 over real frames: they are not on this machine"
 fi

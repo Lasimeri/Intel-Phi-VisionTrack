@@ -9,6 +9,7 @@
 #include <string.h>
 #include <time.h>
 
+#include "attitude.h"
 #include "calib.h"
 #include "depth.h"
 #include "img.h"
@@ -26,6 +27,12 @@ static void *host_alloc(void *ctx, size_t bytes)
 struct pyr {
     struct vt_plane l[M3_LEVELS];
 };
+
+static void att_one_thread(void *ctx, att_fn fn, void *arg)
+{
+    (void)ctx;
+    fn(arg, 0, 1);
+}
 
 static void make_pyr(struct pyr *p, int w, int h)
 {
@@ -243,6 +250,17 @@ int main(int argc, char **argv)
         struct still *st[3] = {still_create(&sc_l, host_alloc, NULL), still_create(&sc_r, host_alloc, NULL), still_create(&sc_d, host_alloc, NULL)};
         if (!st[0] || !st[1] || !st[2])
             return 2;
+        const struct m3_cam *const lens[3] = {&F.l, &F.r, &F.d};
+        struct att *att[3];
+        struct att_fix fix[3];
+        memset(fix, 0, sizeof fix);
+        uint64_t att_h = 0xcbf29ce484222325ull;
+        for (int k = 0; k < 3; k++) {
+            const struct att_cfg ac = {lens[k]->w >> lv, lens[k]->h >> lv, lens[k]->f / (1 << lv), lens[k]->cx / (1 << lv), lens[k]->cy / (1 << lv), F.eps, 1};
+            att[k] = att_create(&ac, host_alloc, NULL);
+            if (!att[k])
+                return 2;
+        }
         uint64_t still_h = VT_FNV_INIT;
         /* Where card and host part ways, when they do: every cell of every frame, as vt_m3's third argument writes them. */
         FILE *dump = dump_file ? fopen(dump_file, "wb") : NULL;
@@ -266,8 +284,24 @@ int main(int argc, char **argv)
                     fwrite(still_cells(st[k]), still_cell_bytes(st[k]), 1, dump);
             }
             printf("still_frame %d moving %u %u %u tracked %u %u %u noise %.3f %.3f %.3f\n", i, m[0].moving, m[1].moving, m[2].moving, m[0].tracked, m[1].tracked, m[2].tracked, (double)m[0].diff_median, (double)m[1].diff_median, (double)m[2].diff_median);
+            /* The attitude kernel, as live: the still picture after a few frames is the reference, each later one measured against it. */
+            for (int k = 0; k < 3; k++) {
+                if (i < M3_ATT_REF_FRAME)
+                    continue;
+                if (i == M3_ATT_REF_FRAME) {
+                    att_set_reference(att[k], still_mean(st[k]), att_one_thread, NULL);
+                } else {
+                    att_measure(att[k], still_mean(st[k]), 1, att_one_thread, NULL, &fix[k]);
+                    att_h = att_fix_hash(&fix[k], att_h);
+                }
+            }
         }
         printf("still_hash %016llx\n", (unsigned long long)still_h);
+        if (F.frames > M3_ATT_REF_FRAME + 1) {
+            for (int k = 0; k < 3; k++)
+                printf("att_last %d q %.9f %.9f %.9f %.9f corr %.6f none %.6f used %.6f view %.6f held %d\n", k, fix[k].q[0], fix[k].q[1], fix[k].q[2], fix[k].q[3], fix[k].corr, fix[k].corr_identity, fix[k].used, fix[k].view, fix[k].held);
+            printf("att_hash %016llx\n", (unsigned long long)att_h);
+        }
         if (dump)
             fclose(dump);
         ll = still_mean(st[0]);

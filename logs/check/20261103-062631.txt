@@ -1,0 +1,16 @@
+date   2026-11-03 06:26:31 CST
+tree   /media/1TB-NVMe/Intel-Phi-VisionTrack (git 8481152)
+stack  /media/1TB-NVMe/Xeon-Phi/Intel Phi 7120A (git aeb1d1c)
+cc     clang version 23.1.1 (https://github.com/llvm/llvm-project.git 6dfe1677ab8dffbc6ec13d53a1e0215d75147689)
+PASS  host reference programs
+PASS  M0 vector operations, card = lane model (20 lines identical)
+PASS  M1 kernels 640,480, card = host (8 lines identical)
+PASS  M1 kernels 1280,720, card = host (8 lines identical)
+PASS  M1 kernels 1920,1080, card = host (8 lines identical)
+PASS  M2 LK, card = lane model (20 lines identical)
+phictl put: 45619672 bytes
+FAIL  M3 still pictures, attitude and depth map over 9 real frames, card = host
+14c14
+< att_hash bb629c96b168b908
+---
+> att_hash 936c5935737d90d7

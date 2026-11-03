@@ -415,7 +415,7 @@ int session_track(struct vt_ctl *ctl, struct vt_dma *dma, const struct topo *top
             /* The map goes before the result on the same channel, so the wait for the result above also covers the map's buffers. */
             if (ld) {
                 const uint64_t t3 = vt_tsc();
-                ld_frame(ld, cam, tk_level(cur, set, VT_DEPTH_LEVEL));
+                ld_frame(ld, cam, tk_level(cur, set, ld_flow_level(ld)));
                 if (cam == 2 && ld_map(ld, m, depth_pub_addr) == UINT64_MAX) {
                     fprintf(stderr, "vtrackd: depth map copy refused\n");
                     rc = -1;

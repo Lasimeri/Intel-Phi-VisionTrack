@@ -51,7 +51,7 @@ Each camera is one tracker on the card, sharing the team, frames interleaved in 
 
 ## Navigation by fixed lights (user's direction, 2026-11-03)
 
-The room's LEDs are treated as a star tracker treats stars. `src/host/stars.{h,c}`, on the desktop host, a fix per camera per second from a 16-frame mean, on its own thread (`nav_main`): on the draw thread it froze the window for 33 to 40 ms every second.
+The room's LEDs are treated as a star tracker treats stars. `src/host/stars.{h,c}`, on the desktop host, a fix per camera per second from a 16-frame mean, on its own thread (`nav_main`): on the draw thread it froze the window for 33 to 40 ms every second. Since 2026-11-03 this is a check only, as "Calibration that holds itself" explains; the table below is the method, and the carrying it describes is no longer done by the lights.
 
 | Orbital or GPS method | Here |
 | --- | --- |
@@ -67,6 +67,29 @@ The room's LEDs are treated as a star tracker treats stars. `src/host/stars.{h,c
 A camera's translation is invisible to this, so beyond 5 degrees or 15 px the geometry is declared stale and no 3D is shown. References: Spratling and Mortari 2009, "A Survey on Star Identification Algorithms", mdpi.com/1999-4893/2/1/93; Shuster on QUEST, malcolmdshuster.com/Pubp_010_031z_J_JAS1290_cquest_MDS.pdf.
 
 **What the design needs next:** lights spread in view of L and R. Today they share one bright LED and its faint companion 45 mm apart, which is one bearing.
+
+## Calibration that holds itself (the user's direction, 2026-11-03)
+
+"Constant and convolutional", with no lock. The first solve below is still how a rig is first calibrated; this keeps it true afterwards. Original C throughout, the published work read for its mathematics only.
+
+The method rests on one observation: L and R are 56 degrees apart and appearance fails across that gap, but **a camera compared with itself has no gap**. So each camera measures only its own turn, against its own reference, and the pair follows in closed form, R' = Ob R Oa', T' = Ob T. A New 3DS has the same shape, stored constants plus a closed-form correction from a live measurement, though its eye tracking has no place here.
+
+| Stage | How |
+| --- | --- |
+| Picture | the camera's still picture at the map's level, averaged and gated by the card's vectors, already on the card |
+| Normalize | each pixel's distance from its 9 x 9 mean, in units of that window's spread, so a light switched on changes little |
+| Search | every shift over the reference at a quarter of that level, a correlation each, in units of chance so a small overlap cannot win. Reaches +-640 and +-480 pixels of a 1080p camera |
+| Refine | Gauss-Newton on three rotation parameters, coarse to fine, inverse compositional: the reference's gradients are computed once. Homography exact at each end of 16 lanes, straight between, four `vgatherdps` for the bilinear sample |
+| Kernel | Tukey's biweight on each residual, no division on a machine without one: whatever moved has no say |
+| Earn it | a turn must beat no turn by 0.10 of correlation and exceed 0.1 degree, or nothing changes |
+| Chain | a turn that lasts 5 measurements while the picture is quiet becomes the new reference, and so does a reference the light has left behind, at most every 30 s |
+| Bit-exact | quaternions, first order and renormalized, because `sin` differs between the two libm; sums per row added in row order, so 1 thread and 118 agree |
+
+On the card once a second per camera, 2.6 to 3.6 ms each. `vt_view` carries the geometry when a turn shows twice, and keeps it on file after 10 steady seconds, so a restart does not fall back to a pose the rig has left. A camera that cannot find itself for 5 seconds (under 0.2 correlation or a quarter of the view) hides the map and the 3D point.
+
+**Why not the others.** A CNN (the one published method found covers +-2.5 degrees, and needs training pairs this rig does not have) was ruled out by the user's rule and the numbers alike. Tracking the essential matrix between L and R needs matches that this angle does not give (7 to 15 inliers). Tuning on the map's confidence fails with anyone in view (measurements.md). Motion barcodes, correlating motion along epipolar lines, would need no appearance at all and remain the way to check L against R directly: not built.
+
+**The star tracker is now a check.** Each fix searched around the last, which is a lock: a hidden light walked it onto something else, and it called that a move. It has no memory now, and neither carries the geometry nor turns the map off.
 
 ## How the geometry is found, and how it is not
 
@@ -98,6 +121,8 @@ After the method Nintendo describes for the 3DS, per unit stored rotation, trans
 
 No depth without texture, a clearly best match, and at least half the planes inside the other view: without that rule a door L never saw received a confident depth.
 
+**What this does not yet achieve.** Each view's cost is summed against D, so nothing requires R and L to arrive at the same depth by themselves, and measured they mostly do not: `vt_agree` asks exactly that, and it has become the honest judge, since the map's own confidence cannot judge geometry with anyone in view. 64 planes is also too few for this rig: 4 to 6 pixels a plane at this level. See measurements.md, "Do L and R agree through D?".
+
 **Live, on the card (`src/card/live_depth.c`).** In the three-camera session, on the session's own team, between frames. Every frame of every camera updates that camera's still picture; every frame of D then normalizes the three still pictures, sweeps, aggregates and decides. z, confidence, each camera's cells and last a head go by DMA to one of two 1 MiB buffers in the free [2 MiB, 4 MiB) of the region part, and the head's DMA status writes `depth_pub`, so the word that names a map comes after every byte of it on the same channel. The depth copy goes before that frame's result, so the wait for the result also protects the map's buffers. The relation of the views comes from one function, `depth_views_from_calib`, used by this and by `m3_ref`, recomputed at every `calib_seq`, so the star fixes carry the map too.
 
 `vt_view` draws it beside D (`src/host/depthview.c`): nearest warm, furthest cold, no depth black, confidence below 0.2 at a quarter brightness, because measured, those depths can be metres wrong. Also from above in the panel, one line a map in `logs/live/depth-*.csv`, and on the order `map`, `out/run/map.{bin,pgm,ply}`.
@@ -116,6 +141,8 @@ LK flow is what the card measures best, and motion, unlike appearance, does not 
 | Moved | a vector longer than 0.25 pixels **and** 12 of LK's own sigmas; LK's residual failing; or the cell's mean difference above 2 grey levels and 3 times this camera's median. At least 2 such cells in a 3 x 3 for any to count. A round-trip failure is not evidence: noise alone fails it |
 | Everything moved | a camera's median difference above 3 times its usual median: all its cells restart. Otherwise a camera knocked or a light switched on would raise its own limit and go unseen |
 | Mean | weight 1 / min(count, 128) per cell, one FMA per 16 lanes; the first frame in a cell is that frame exactly |
+
+**Resolution.** The still pictures run at a pyramid level set at run time, native by default: 16,200 cells for L and R, 7,200 for D, the finest that holds on one card (measurements.md). The table's cell counts are for level 2, where this began. The map and the attitude kernel read level 2, reduced from it on the team, so the three costs stay separate.
 
 The choice over the design first written here, averaging the cost volume: three small planes against 15 MB at 15 Hz, it uses all of L's and R's 30 frames a second, it removes noise before the difference where it biases, and it reproduces the very exposures the 17.82 % came from.
 

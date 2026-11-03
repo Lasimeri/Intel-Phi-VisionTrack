@@ -9,6 +9,7 @@
 #define M3_LEVEL_D 2 /* pyramid level of each view the sweep reads */
 #define M3_LEVELS 3
 #define M3_MAX_FRAMES 64
+#define M3_ATT_REF_FRAME 3 /* the attitude kernel's reference: the still picture after this frame */
 
 struct m3_cam {
     int32_t w, h;

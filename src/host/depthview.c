@@ -121,7 +121,7 @@ void dv_vectors(struct x11view *v, const void *map, int cam, int pane_x, int pan
     if (!m->cols || !m->cell_at)
         return;
     const struct vt_cell *cells = vt_depth_cells(map, cam);
-    const int scale = 1 << VT_DEPTH_LEVEL;
+    const int scale = 1 << h->flow_level;
     /* Pixels of the level drawn in pixels of the camera, and then made visible: a vector of a quarter of a level's pixel is one pixel of the camera. */
     const double gain = (double)scale * (all ? 64.0 : 4.0);
     for (uint32_t r = 0; r < m->rows; r++)
@@ -207,7 +207,7 @@ void dv_csv(FILE *f, const void *map, double wall_s, double tsc_hz, unsigned lin
         fprintf(f, ",%llu,%u,%u,%.1f,%.4f,%.4f,%.4f,%.3f,%.0f,%.0f", (unsigned long long)m->frames, m->tracked, m->moving, (double)m->count_mean, (double)m->drift_u, (double)m->drift_v, (double)m->drift_rms, (double)m->diff_median, (double)m->cycles_vectors * us, (double)m->cycles_mean * us);
         /* Where this camera saw something change, in its own pixels: a small thing moving is one place in each view at one moment, with no appearance to match. */
         const struct vt_cell *cells = vt_depth_cells(map, k);
-        const double cell_x = (double)(VT_CELL_W << VT_DEPTH_LEVEL), cell_y = (double)(VT_CELL_H << VT_DEPTH_LEVEL);
+        const double cell_x = (double)(VT_CELL_W << h->flow_level), cell_y = (double)(VT_CELL_H << h->flow_level);
         double sx = 0.0, sy = 0.0, sxx = 0.0;
         unsigned n = 0;
         for (uint32_t r = 0; r < m->rows; r++)
