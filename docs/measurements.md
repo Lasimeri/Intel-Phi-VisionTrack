@@ -558,3 +558,29 @@ The region ran out of patience, read LOST for 101 results, and kept its track id
 **Retracted, on the way.** A gap of 1.57 s, a jump of 164 px and R's rate falling to 68 to 112 per 5 s, read from `logs/live/track-20261103-080810.csv` as a stall, were not. That log wrote only results with a 3D flag, so the gaps meant no 3D result. It now writes every result of a region.
 
 **All gates on this build:** `scripts/check.sh`, `logs/check/20261103-084917.txt`: 54 passed, 0 failed, 0 skipped, with `comeback` and eleven runs with generated frames among them, card = host on every result.
+
+## A correlation over 1 (2026-11-03 09:00 to 09:05)
+
+**Found by scanning the live log for impossible values:** `logs/live/track-20261103-084118.csv` has 58 rows with an appearance correlation over 1, up to 10.631, and the region taken back again and again in 2 s around one place. A correlation cannot exceed 1. On nearly blank windows the sum of squares runs near 2^37 in single precision, whose rounding is larger than the window's whole variance, which is the denominator. So a blank patch outscored the thing, and a search of the whole picture walks straight to it.
+
+| Test | Before | After |
+|---|---|---|
+| `vt_ncc_check`, the tracker's own function, nearly blank windows at 5 levels and 8 noises, under a grey level. Before: a scratch copy of the same arithmetic, 20,000 windows each | worst 6.13 at level 12800, 1.58 at 6400 | 200,000 windows: worst 0.0000, none over 1. The template itself 1.000000, at a third of its contrast 1.000000 |
+
+A scene with an exactly flat patch did **not** reproduce it: flat 8-bit values have zero variance, which was already refused. So the gate is `vt_ncc_check`, not a scene. Sums now run relative to the window's first pixel, and a window with under 1/16 of the template's energy, contrast under a quarter, scores 0.
+
+**The search's cost.** Cells are now handed out one at a time; whole rows of cells left most of the team idle. The whole picture is searched a band of 32,000 positions a frame.
+
+| Scene `comeback` | Lost, region stage, mean | max |
+|---|---|---|
+| 640x480, before | 2,052 us | 2,278 us |
+| 640x480, after | 450 us | 488 us |
+| 1920x1080, after | 516 us | 620 us |
+
+One region. A small box at full resolution needs about 16 frames a memory, about 2 s for all four (arithmetic), at the same band per frame; not run.
+
+**Taking back to a fraction of a half pixel.** Placing the centre on the half-pixel grid left a constant error for the rest of the track, since the centre stays where it is put: `comeback` 0.605 px at take back and a median of 0.603 after. With a parabola between the half pixels: 0.146 and 0.146, at frame 182. With generated frames 0.148 and 0.150. At 1920x1080, frame 178, 0.002 px.
+
+**Seen on the way, 1920x1080:** the selection frame of `comeback`'s 1,152 x 922 box costs 15.7 ms, and the worst reseeding frame 10.9 ms: corner detection over a very large box is still felt.
+
+**All gates on the final build:** `scripts/check.sh`, `logs/check/20261103-090516.txt`: 55 passed, 0 failed, 0 skipped.

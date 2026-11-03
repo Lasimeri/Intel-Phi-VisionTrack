@@ -30,6 +30,7 @@ for wh in 640,480 1280,720 1920,1080; do
 done
 out/host/m2_ref 640 480 >"$s/m2h"
 pass "host reference programs"
+if out/host/vt_ncc_check >"$s/ncc" 2>&1; then pass "appearance correlation: nearly blank windows never match, never read over 1: $(cut -c1-90 "$s/ncc")"; else fail "appearance correlation"; head -3 "$s/ncc"; fi
 
 if ! card_up; then
     skip "the card is not reachable"

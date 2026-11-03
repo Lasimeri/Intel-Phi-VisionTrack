@@ -467,11 +467,11 @@ static void *link_main(void *arg)
                     strftime(path, sizeof path, "logs/live/track-%Y%m%d-%H%M%S.csv", &tm);
                     track_csv = fopen(path, "w");
                     if (track_csv)
-                        fprintf(track_csv, "acq_s,camera,instance,state,flags,epoch,cx,cy,meas_x,meas_y,meas_z,reproj_px,parallax_deg,gap_ms,nis,pos_x,pos_y,pos_z,vel_x,vel_y,vel_z,sig_x,sig_y,sig_z,age_s,w,h,nfeat,inliers,reacq_ncc\n");
+                        fprintf(track_csv, "acq_s,camera,instance,state,flags,epoch,cx,cy,meas_x,meas_y,meas_z,reproj_px,parallax_deg,gap_ms,nis,pos_x,pos_y,pos_z,vel_x,vel_y,vel_z,sig_x,sig_y,sig_z,age_s,w,h,nfeat,inliers,reacq_ncc,lat_ms\n");
                 }
                 if (track_csv) {
                     const struct vt_result *q = &K->last;
-                    fprintf(track_csv, "%.6f,%u,%llu,%u,%u,%u,%.3f,%.3f,%.5f,%.5f,%.5f,%.3f,%.3f,%.3f,%.3f,%.5f,%.5f,%.5f,%.5f,%.5f,%.5f,%.5f,%.5f,%.5f,%.4f,%.1f,%.1f,%u,%.3f,%.3f\n", (double)q->hdr.acq_ns * 1e-9, k, (unsigned long long)q->hdr.instance, q->state, q->flags, A.pair_epoch, (double)q->cx, (double)q->cy, q->meas[0], q->meas[1], q->meas[2], q->reproj_rms, q->parallax_deg, q->pair_gap_ms, q->nis, q->pos[0], q->pos[1], q->pos[2], q->vel[0], q->vel[1], q->vel[2], sqrt(q->pos_cov[0]), sqrt(q->pos_cov[4]), sqrt(q->pos_cov[8]), q->age_s, (double)q->w, (double)q->h, q->nfeat, (double)q->inliers, (double)q->reacq_ncc);
+                    fprintf(track_csv, "%.6f,%u,%llu,%u,%u,%u,%.3f,%.3f,%.5f,%.5f,%.5f,%.3f,%.3f,%.3f,%.3f,%.5f,%.5f,%.5f,%.5f,%.5f,%.5f,%.5f,%.5f,%.5f,%.4f,%.1f,%.1f,%u,%.3f,%.3f,%.3f\n", (double)q->hdr.acq_ns * 1e-9, k, (unsigned long long)q->hdr.instance, q->state, q->flags, A.pair_epoch, (double)q->cx, (double)q->cy, q->meas[0], q->meas[1], q->meas[2], q->reproj_rms, q->parallax_deg, q->pair_gap_ms, q->nis, q->pos[0], q->pos[1], q->pos[2], q->vel[0], q->vel[1], q->vel[2], sqrt(q->pos_cov[0]), sqrt(q->pos_cov[4]), sqrt(q->pos_cov[8]), q->age_s, (double)q->w, (double)q->h, q->nfeat, (double)q->inliers, (double)q->reacq_ncc, (double)(K->recv_ns - q->hdr.acq_ns) * 1e-6);
                     fflush(track_csv);
                 }
             }

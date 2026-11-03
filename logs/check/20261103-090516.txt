@@ -1,0 +1,62 @@
+date   2026-11-03 09:05:16 CST
+tree   /media/1TB-NVMe/Intel-Phi-VisionTrack (git df6cb69)
+stack  /media/1TB-NVMe/Xeon-Phi/Intel Phi 7120A (git aeb1d1c)
+cc     clang version 23.1.1 (https://github.com/llvm/llvm-project.git 6dfe1677ab8dffbc6ec13d53a1e0215d75147689)
+PASS  host reference programs
+PASS  appearance correlation: nearly blank windows never match, never read over 1: 200000 nearly blank windows: worst correlation 0.0000, over 1: 0, reading 0.5 or more: 0. 
+PASS  M0 vector operations, card = lane model (20 lines identical)
+PASS  M1 kernels 640,480, card = host (8 lines identical)
+PASS  M1 kernels 1280,720, card = host (8 lines identical)
+PASS  M1 kernels 1920,1080, card = host (8 lines identical)
+PASS  M2 LK, card = lane model (20 lines identical)
+phictl put: 45619672 bytes
+PASS  M3 still pictures, attitude and depth map over 9 real frames, card = host (15 lines identical)
+phictl put: 234400 bytes
+PASS  scene translate: tolerances and replay
+PASS  scene shapes: tolerances and replay
+PASS  scene camera: tolerances and replay
+PASS  scene brightness: tolerances and replay
+PASS  scene noise: tolerances and replay
+PASS  scene occlusion: tolerances and replay
+PASS  scene loss: tolerances and replay
+PASS  scene leave: tolerances and replay
+PASS  scene helix: tolerances and replay
+PASS  scene linear3d: tolerances and replay
+PASS  scene glitch: tolerances and replay
+PASS  scene repeat: tolerances and replay
+PASS  scene flat: tolerances and replay
+PASS  scene bigbox: tolerances and replay
+PASS  scene smallbox: tolerances and replay
+PASS  scene stillstart: tolerances and replay
+PASS  scene rotate: tolerances and replay
+PASS  scene swing: tolerances and replay
+PASS  scene hold: tolerances and replay
+PASS  scene comeback, past any patience and back: tolerances and replay
+PASS  scene translate with generated frames: tolerances and replay
+PASS  scene occlusion with generated frames: tolerances and replay
+PASS  scene loss with generated frames: tolerances and replay
+PASS  scene bigbox with generated frames: tolerances and replay
+PASS  scene smallbox with generated frames: tolerances and replay
+PASS  scene stillstart with generated frames: tolerances and replay
+PASS  scene rotate with generated frames: tolerances and replay
+PASS  scene swing with generated frames: tolerances and replay
+PASS  scene hold with generated frames: tolerances and replay
+PASS  scene comeback with generated frames: tolerances and replay
+PASS  scene dual with generated frames: tolerances and replay
+PASS  scene dual, two independently tracked views: tolerances and replay
+PASS  scene translate, mode A: tolerances and replay
+PASS  mode A reports no metric output
+PASS  3 threads a core: replay identical
+PASS  2 pipelines: replay identical
+PASS  exception kind 1: dropped, reported, 60 results
+PASS  exception kind 2: dropped, reported, 60 results
+PASS  exception kind 3: dropped, reported, 60 results
+PASS  exception kind 4: dropped, reported, 60 results
+PASS  exception kind 5: dropped, reported, 60 results
+PASS  a stereo destination in a mono session: ignored and reported
+PASS  an unknown soft-configuration key: ignored and reported
+PASS  wrong wire format refused, with its reason
+PASS  next session after a refusal runs
+PASS  soft configuration mid-stream: replay identical
+PASS  soft configuration took effect: no frame after 40 holds over 40 features
+-- 55 passed, 0 failed, 0 skipped

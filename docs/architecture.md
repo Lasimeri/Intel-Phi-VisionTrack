@@ -76,8 +76,9 @@ There is no time-out. Past its patience (2 s live) a region claims no position a
 | --- | --- |
 | Memory | Four appearances: the first since the box closed, never replaced, and about 0.5, 2 and 8 s old, from frames over 90 % agreed. Each has its level, offset and the box it had. The box closing clears them, since until then they may hold background |
 | Near the prediction | While predicting, every memory within 12 to 36 px, as far in the picture at any level. Believed at 0.82 |
-| The whole picture | After 8 frames, or once lost: one memory a frame, a map of the best per 16 x 16 places, on the team. Believed at 0.88, 0.04 clear of any other peak, and again on the next frame within 24 px |
-| Half pixels | The map's top 8 cells are scored again at half-pixel steps before anything is judged: on fine texture a whole-pixel search at 1/4 scale can stand half a pixel off and read 0.5 at the right place |
+| The whole picture | After 8 frames, or once lost: a band of 32,000 positions a frame, one memory after another, a map of the best per 16 x 16 places, on the team. About 0.5 ms a frame. A coarse memory's scan takes a frame or two, a small thing's about half a second. Believed at 0.88, 0.04 clear of any other peak in the band, and again on the next frame within 24 px |
+| Half pixels | The map's top 8 cells are scored again at half-pixel steps before anything is judged: on fine texture a whole-pixel search at 1/4 scale can stand half a pixel off and read 0.5 at the right place. A parabola places the winner between them |
+| Blank windows | Sums run relative to the window's first pixel, and a window with under 1/16 of the template's energy scores 0. In absolute terms rounding read correlations up to 10.6 on nearly blank patches, which took the region |
 | Coasting | A lost region's rate decays 5 % a frame: a thing out of sight is not known to keep going |
 
 ### Generated frames (user's direction, 2026-11-03)

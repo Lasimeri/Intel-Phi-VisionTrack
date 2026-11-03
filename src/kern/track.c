@@ -52,6 +52,8 @@
 #define REACQ_AGAIN_PX 24       /* and again on the next frame within these full-resolution pixels */
 #define SEARCH_CELL 16          /* template positions to a cell of the search's map */
 #define SEARCH_TOP 8            /* cells of the map looked at again in half pixels */
+#define APP_MIN_ENERGY 0.0625L  /* of the template's energy: a window with less, contrast under a quarter, is not the thing */
+#define REACQ_BAND 32000        /* template positions of the whole-picture search per frame: the rest of the picture on later frames */
 #define APP_SLOTS 4             /* appearances remembered */
 
 /* One remembered appearance: a zero-mean template at its level, its sub-pixel offset from the region's centre, and the region's size when it was taken. */
@@ -104,7 +106,7 @@ struct tracker {
     /* appearance, for taking a lost region back */
     struct app_slot app[APP_SLOTS];
     uint32_t app_ticks;
-    int app_turn;
+    int app_turn, scan_y;
     int cand_run, cand_slot; /* seen far away last frame, not yet believed */
     float cand_x, cand_y;
     float *sc_v; /* the search's map, a best per cell */
@@ -158,11 +160,15 @@ static real search_at(const struct vt_plane *pl, const float *app, real norm_t, 
 {
     if (x < 1 || y < 1 || x + APP_W >= pl->w - 1 || y + APP_H >= pl->h - 1)
         return -1.0L;
+    /* Relative to the window's first pixel: whole numbers still, and small ones. In absolute terms the sum of squares of a bright window runs to 2^37 in single precision, whose rounding is larger than the whole variance of a
+     * nearly blank one, and such a window read correlations of 1.6 and 10.6 and took the region (live, 2026-11-03). And a window with little energy against the template's cannot be the thing, whatever it correlates. */
+    const float first VX_ALIGNED = plane_row(pl, y)[x];
+    const vxf base = vx_bcast(&first);
     vxf st = vx_zero(), sj = vx_zero(), sjj = vx_zero();
     for (int r = 0; r < APP_H; r++) {
         const float *row = plane_row(pl, y + r) + x;
         for (int k = 0; k < APP_W; k += VX_LANES) {
-            const vxf v = vx_loadu(row + k);
+            const vxf v = vx_sub(vx_loadu(row + k), base);
             st = vx_fma(v, vx_load(app + r * APP_W + k), st);
             sj = vx_add(sj, v);
             sjj = vx_fma(v, v, sjj);
@@ -171,8 +177,10 @@ static real search_at(const struct vt_plane *pl, const float *app, real norm_t, 
     const real n = R(APP_W * APP_H);
     const real a = R(vx_hsum(st)), b = R(vx_hsum(sj)), c = R(vx_hsum(sjj));
     const real var = c - b * b / n;
-    return (var <= 0.0L || norm_t <= 0.0L) ? 0.0L : a / sqrtl(norm_t * var);
+    return (var <= norm_t * APP_MIN_ENERGY || norm_t <= 0.0L) ? 0.0L : a / sqrtl(norm_t * var);
 }
+
+long double tk_correlate(const struct vt_plane *pl, const float *app, long double norm, int x, int y) { return search_at(pl, app, norm, x, y); }
 
 static void job_main(void *arg, int tid, int n)
 {
@@ -283,26 +291,31 @@ static void job_main(void *arg, int tid, int n)
         }
         break;
     case OP_SEARCH: {
-        /* The best correlation of each cell of 16 x 16 positions. A thread takes whole rows of cells, each worked in one order, so the answer is the same at any thread count, and more than one peak can be seen. */
+        /* The best correlation of each cell of 16 x 16 positions. A thread takes a cell at a time, each worked in one order, so the answer is the same at any thread count, and more than one peak can be seen. Whole rows of
+         * cells left most of the team idle: seven rows at a quarter of 640 x 480, 2.05 ms a frame while lost. */
         const struct app_slot *a = &t->app[j->slot];
         const struct vt_plane *pl = &t->pyr[t->cur][0].l[a->level];
+        const int cells = j->cell_cols * j->cell_rows;
         for (;;) {
-            const int cr = __atomic_fetch_add(&j->next, 1, __ATOMIC_RELAXED);
-            if (cr >= j->cell_rows)
+            const int cell = __atomic_fetch_add(&j->next, 1, __ATOMIC_RELAXED);
+            if (cell >= cells)
                 break;
-            for (int c = 0; c < j->cell_cols; c++)
-                t->sc_v[cr * j->cell_cols + c] = -2.0f;
-            const int y0 = j->y0 + cr * SEARCH_CELL, y1 = y0 + SEARCH_CELL <= j->y1 + 1 ? y0 + SEARCH_CELL : j->y1 + 1;
+            const int y0 = j->y0 + (cell / j->cell_cols) * SEARCH_CELL, x0 = j->x0 + (cell % j->cell_cols) * SEARCH_CELL;
+            const int y1 = y0 + SEARCH_CELL <= j->y1 + 1 ? y0 + SEARCH_CELL : j->y1 + 1, x1 = x0 + SEARCH_CELL <= j->x1 + 1 ? x0 + SEARCH_CELL : j->x1 + 1;
+            float top = -2.0f;
+            int bx = x0, by = y0;
             for (int y = y0; y < y1; y += j->step)
-                for (int x = j->x0; x <= j->x1; x += j->step) {
-                    const int cell = cr * j->cell_cols + (x - j->x0) / SEARCH_CELL;
+                for (int x = x0; x < x1; x += j->step) {
                     const float v = (float)search_at(pl, a->pix, R(a->norm), x, y);
-                    if (v > t->sc_v[cell]) {
-                        t->sc_v[cell] = v;
-                        t->sc_x[cell] = x;
-                        t->sc_y[cell] = y;
+                    if (v > top) {
+                        top = v;
+                        bx = x;
+                        by = y;
                     }
                 }
+            t->sc_v[cell] = top;
+            t->sc_x[cell] = bx;
+            t->sc_y[cell] = by;
         }
         break;
     }
@@ -872,6 +885,7 @@ static void end_region(struct tracker *t, uint32_t state)
         t->app[i].valid = 0;
     t->app_ticks = 0;
     t->app_turn = 0;
+    t->scan_y = 1;
     t->cand_run = 0;
     t->kf.valid = 0;
     t->split_run = 0;
@@ -1382,6 +1396,8 @@ static real search_half(const struct vt_plane *pl, const struct app_slot *a, int
     if (x < 1 || y < 1 || x + APP_W + 1 >= pl->w - 1 || y + APP_H + 1 >= pl->h - 1)
         return -1.0L;
     const vxf half = vx_bcast(&HALF);
+    const float first VX_ALIGNED = plane_row(pl, y)[x];
+    const vxf base = vx_bcast(&first);
     vxf st = vx_zero(), sj = vx_zero(), sjj = vx_zero();
     for (int r = 0; r < APP_H; r++) {
         const float *row = plane_row(pl, y + r) + x, *below = plane_row(pl, y + r + 1) + x;
@@ -1395,6 +1411,7 @@ static real search_half(const struct vt_plane *pl, const struct app_slot *a, int
                     w = vx_mul(vx_add(w, vx_loadu(below + k + 1)), half);
                 v = vx_mul(vx_add(v, w), half);
             }
+            v = vx_sub(v, base);
             st = vx_fma(v, vx_load(a->pix + r * APP_W + k), st);
             sj = vx_add(sj, v);
             sjj = vx_fma(v, v, sjj);
@@ -1403,7 +1420,17 @@ static real search_half(const struct vt_plane *pl, const struct app_slot *a, int
     const real n = R(APP_W * APP_H), norm = R(a->norm);
     const real sa = R(vx_hsum(st)), sb = R(vx_hsum(sj)), sc = R(vx_hsum(sjj));
     const real var = sc - sb * sb / n;
-    return (var <= 0.0L || norm <= 0.0L) ? 0.0L : sa / sqrtl(norm * var);
+    return (var <= norm * APP_MIN_ENERGY || norm <= 0.0L) ? 0.0L : sa / sqrtl(norm * var);
+}
+
+/* One axis of a parabola through three correlations: the peak's offset, within half a step. */
+static real peak_offset(real l, real c, real r)
+{
+    const real den = l - 2.0L * c + r;
+    if (den >= 0.0L)
+        return 0.0L;
+    const real o = 0.5L * (l - r) / den;
+    return o < -0.5L ? -0.5L : o > 0.5L ? 0.5L : o;
 }
 
 /* The best place for a remembered appearance in a window of template corners, and the best place clear of it: a thing's peak stands alone, a repeating pattern's or a blank wall's does not. The top cells of the map are
@@ -1487,11 +1514,15 @@ static inline void corner_for(const struct app_slot *a, real x, real y, int *cx,
 static int take_back(struct tracker *t, const struct found *f, struct vt_result *o)
 {
     const struct app_slot *a = &t->app[f->slot];
+    const struct vt_plane *pl = &t->pyr[t->cur][0].l[a->level];
     const real scale = R(1 << a->level);
+    /* Between the half pixels, by a parabola: the centre stays where it is put from here on, and half a pixel of a coarse level is a pixel or two of the picture, for the rest of the track. */
+    const real ox = peak_offset(search_half(pl, a, f->hx - 1, f->hy), f->ncc, search_half(pl, a, f->hx + 1, f->hy));
+    const real oy = peak_offset(search_half(pl, a, f->hx, f->hy - 1), f->ncc, search_half(pl, a, f->hx, f->hy + 1));
     /* The template's corner is its centre less these whole pixels, the same whole division store_appearance used. */
     const int half_w = APP_W / 2, half_h = APP_H / 2;
-    o->reacq_x = (float)((0.5L * R(f->hx) + R(half_w) + R(a->fx)) * scale);
-    o->reacq_y = (float)((0.5L * R(f->hy) + R(half_h) + R(a->fy)) * scale);
+    o->reacq_x = (float)((0.5L * (R(f->hx) + ox) + R(half_w) + R(a->fx)) * scale);
+    o->reacq_y = (float)((0.5L * (R(f->hy) + oy) + R(half_h) + R(a->fy)) * scale);
     const float was_cx = t->cx, was_cy = t->cy, was_w = t->rw, was_h = t->rh;
     t->cx = o->reacq_x;
     t->cy = o->reacq_y;
@@ -1554,7 +1585,7 @@ static int try_reacquire(struct tracker *t, int alg, struct vt_result *o)
             int cx, cy;
             corner_for(a, R(t->cx), R(t->cy), &cx, &cy);
             const int r = (reach >> a->level) < REACQ_MIN_STEPS ? REACQ_MIN_STEPS : reach >> a->level;
-            search_slot(t, i, cx - r, cx + r, cy - r, cy + r, 1, alg, &f);
+            search_slot(t, i, cx - r, cx + r, cy - r, cy + r, a->level == 0 ? 2 : 1, alg, &f);
             if (f.ncc > near.ncc)
                 near = f;
         }
@@ -1565,15 +1596,27 @@ static int try_reacquire(struct tracker *t, int alg, struct vt_result *o)
         if (t->missing < REACQ_FAR_AFTER)
             return 0;
     }
-    /* The whole picture, with the next memory in turn. */
+    /* The whole picture, a band of it a frame, one memory after another. A coarse memory's scan takes a frame or two, a fine one's a second or so: a small thing's search at full resolution was 54 ms a frame by arithmetic, on
+     * the path everything else waits for. */
     int slot = t->app_turn;
     for (int i = 0; i < APP_SLOTS; i++, slot = (slot + 1) % APP_SLOTS)
         if (t->app[slot].valid)
             break;
-    t->app_turn = (slot + 1) % APP_SLOTS;
+    if (slot != t->app_turn) {
+        t->app_turn = slot;
+        t->scan_y = 1;
+    }
     const struct app_slot *a = &t->app[slot];
     const struct vt_plane *pl = &t->pyr[t->cur][0].l[a->level];
-    search_slot(t, slot, 1, pl->w, 1, pl->h, a->level <= 1 ? 2 : 1, alg, &f);
+    const int step = a->level <= 1 ? 2 : 1, cols = (pl->w - APP_W) / step + 1;
+    const int want_rows = REACQ_BAND * step / cols, rows = want_rows < step ? step : want_rows;
+    const int band0 = t->scan_y < 1 ? 1 : t->scan_y, band1 = band0 + rows - 1;
+    search_slot(t, slot, 1, pl->w, band0, band1, step, alg, &f);
+    t->scan_y = band1 + 1;
+    if (t->scan_y > pl->h - APP_H - 2) {
+        t->scan_y = 1;
+        t->app_turn = (slot + 1) % APP_SLOTS;
+    }
     if (f.ncc > shown)
         o->reacq_ncc = (float)f.ncc;
     if (f.ncc >= REACQ_FAR_NCC && f.ncc - f.second >= REACQ_FAR_CLEAR) {
