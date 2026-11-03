@@ -245,6 +245,20 @@ int score_gate(struct score *s, FILE *f)
         NEED(center <= 0.5, "centre median <= 0.5 px");
         NEED(meas <= 0.005, "3D RMSE <= 5 mm");
         break;
+    case SC_BIGBOX:
+    case SC_SMALLBOX:
+    case SC_STILLSTART:
+    case SC_ROTATE:
+    case SC_SWING:
+        NEED(cont >= 0.95, "continuity >= 0.95 with background in the box");
+        NEED(center <= 4.0, "centre median <= 4 px: the region follows the object, not the background");
+        NEED(pct(&s->center, .95) <= 12.0, "centre p95 <= 12 px");
+        break;
+    case SC_HOLD:
+        NEED(cont >= 0.99, "continuity >= 0.99");
+        NEED(center <= 0.5, "centre median <= 0.5 px on a still object");
+        NEED(pct(&s->center, .95) <= 1.0, "centre p95 <= 1 px: it must not slide");
+        break;
     case SC_OCCLUSION:
         NEED(cont >= 0.95, "continuity >= 0.95 under partial occlusion");
         NEED(epe <= 0.02, "EPE median <= 0.02 px");

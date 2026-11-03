@@ -234,6 +234,7 @@ enum vt_state {
 #define VT_FF_3D 2u          /* its 3D point passed every check */
 #define VT_FF_AMBIGUOUS 4u
 #define VT_FF_NEW 8u         /* detected at this frame */
+#define VT_FF_MEMBER 16u     /* moves with the region and votes for it; without this it is riding along, on probation */
 
 enum vt_stage { VT_T_DMA_IN, VT_T_QUEUE, VT_T_PYR, VT_T_LK, VT_T_REGION, VT_T_STEREO, VT_T_EST, VT_T_TRACK, VT_T_DEPTH /* this frame's vectors, mean and, on camera D, map */, VT_T_COUNT };
 

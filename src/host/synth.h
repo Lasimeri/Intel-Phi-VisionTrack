@@ -20,6 +20,12 @@ enum scene_id {
     SC_REPEAT,      /* the object carries a 2D periodic pattern with corners, its period inside the disparity range: stereo is geometrically ambiguous */
     SC_FLAT,        /* the object has almost no texture: nothing to track */
     SC_GLITCH,      /* the right camera's image jumps sideways for frames 70 .. 79: wrong stereo measurements the innovation gate must refuse */
+    SC_BIGBOX,      /* the object moves over a background as busy as itself, selected with a box 2.4 times its size: what an operator's drag really holds */
+    SC_HOLD,        /* a still object under sensor noise, sigma 4: true motion zero, so any travel of the region is error */
+    SC_SMALLBOX,    /* a small object in a box four times its size: most of what is in the box, and most of the box's middle, is background */
+    SC_STILLSTART,  /* as bigbox, but the object stays still for 2 s after it is selected and only then moves: nothing tells it from the background until it does */
+    SC_ROTATE,      /* as bigbox, and the object turns in the image plane at 30 degrees a second */
+    SC_SWING,       /* as bigbox, swinging from side to side, up to 19 pixels a frame: real things accelerate and come back */
     SC_DUAL,        /* a second camera off to the side, turned 17.5 degrees, a different focal length, its shutter 11 ms late: the rig of two cameras that were never a stereo pair */
     SC_COUNT,
 };

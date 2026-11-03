@@ -71,10 +71,13 @@ void dataset_roi(const struct dataset *d, int i, float *roi)
 {
     struct truth t;
     scene_truth(&d->s, i, &t);
-    roi[0] = (float)(t.u - 0.8 * t.half_w);
-    roi[1] = (float)(t.v - 0.8 * t.half_h);
-    roi[2] = (float)(1.6 * t.half_w);
-    roi[3] = (float)(1.6 * t.half_h);
+    /* Inside the object, except where the point of the scene is a box with background in it. */
+    const enum scene_id id = d->s.id;
+    const double k = id == SC_SMALLBOX ? 4.0 : id == SC_BIGBOX || id == SC_STILLSTART || id == SC_ROTATE || id == SC_SWING ? 2.4 : 0.8;
+    roi[0] = (float)(t.u - k * t.half_w);
+    roi[1] = (float)(t.v - k * t.half_h);
+    roi[2] = (float)(2.0 * k * t.half_w);
+    roi[3] = (float)(2.0 * k * t.half_h);
 }
 
 void dataset_roi_cam(const struct dataset *d, int i, int camera, float *roi)

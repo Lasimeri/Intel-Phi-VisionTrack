@@ -67,7 +67,7 @@ fi
 scripts/vtrackd.sh stop >/dev/null 2>&1 || true
 scripts/vtrackd.sh start 512 >/dev/null
 
-for n in translate shapes camera brightness noise occlusion loss leave helix linear3d glitch repeat flat; do
+for n in translate shapes camera brightness noise occlusion loss leave helix linear3d glitch repeat flat bigbox smallbox stillstart rotate swing hold; do
     if scripts/scene.sh "$n" 640x480 --gate >"$s/scene" 2>&1; then pass "scene $n: tolerances and replay"; else fail "scene $n"; /usr/bin/grep -aE 'GATE MISS|DIFFERS' "$s/scene" | head -6; fi
 done
 if scripts/scene.sh dual 640x480 --dual --gate >"$s/scene" 2>&1; then pass "scene dual, two independently tracked views: tolerances and replay"; else fail "scene dual"; /usr/bin/grep -aE 'GATE|replay' "$s/scene" | head -6; fi

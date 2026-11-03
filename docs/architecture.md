@@ -39,6 +39,31 @@ Ingest runs on a free hardware thread of a reserved core, found at run time, so 
 | Kalman on one thread | six states; it takes 22 us | pipeline runs |
 | Fresh DMA driver and team | a standing rule forbids copying between Phi projects unasked; the team needed per-core fan-out anyway | M0: 9.29 us against 14.0 |
 
+## Holding a selected region (2026-11-03)
+
+An operator's drag holds the thing and whatever is around it. The first tracker took the median motion of all it held, so when most of the box was background the region sat on the background reading OBSERVED while the thing walked away: 187.98 px behind with continuity 1.00 in the scene that was added to show it. Nothing had caught this, since every scene until then selected from inside the object. Numbers: [measurements.md](measurements.md).
+
+**The region is a rigid model and a set of members.** The model is a centre, a scale and a rotation: a feature with anchor A sits at c + [a -b; b a] A.
+
+| Part | What it does | What it replaced, and why |
+| --- | --- | --- |
+| Claims | each member says where the centre is, given where it stands; the mode of the claims, weighted to the box's middle, is the majority | medians of frame-to-frame motion, summed. Summing kept every frame's error for good; L's still target crawled 21.5 px in 39 s reading OBSERVED |
+| Parting | a member that moves differently disagrees more with every frame, however slowly, so no per-frame threshold is needed | outliers against a median that was the background's |
+| Fit | least squares over those explained; scale and rotation change only if a feature at the typical radius would move over 0.25 px | a per-frame median stretch whose noise pushed a still region along |
+| Forgiveness | an agreeing member's anchor gives way 3 % a frame, so a slowly changing shape keeps its features | |
+| Founders | corners in the middle half of the drag are members from the first frame | every corner in the box voted from the first frame |
+| Riders | every other corner rides without a vote for 8 frames and joins if it stayed with the model. A closed region moving under 0.1 px a frame proves nothing and takes none in | |
+| A second thing | whatever differs from the majority gets a model of its own, fitted to all of it and narrowed three times. A clump of claims under the old model would not do: a thing that turns has none | |
+| Waking | if the majority is still and the second thing is near the middle and moves for 3 frames, it is what was selected; nothing is thrown out during that trial | |
+| Closing | the box closes on the members when that happens, when a member group parts from a moving majority, or when a moving region throws out riders. Afterwards it follows the members, and looks 1.6 times beyond itself for more of the thing, never past the operator's box | the box stayed as drawn, and detection kept running over all of it |
+| The centre | stays on the point the operator chose, unless a thing found in the box does not hold that point; only then does it go to the thing, and go on refining | |
+
+**Corners are judged where they stand.** The Harris response goes as the gradient to the fourth power, so against one threshold for the box, a sharp corner on an object's outline, whose patch straddles two motions, erased everything inside the object: 11 corners in 384 x 307, and a region lagging 18 %. Now each corner answers to the strongest of its 16 x 16 cell and the eight around it, above a floor. Small boxes space their features closer, down to 6 px, so a small thing gets enough.
+
+**Detection is on the team.** It ran on the tracking thread: 6.1 to 8.0 ms for 384 x 307, on every frame while features were low, and judging corners by neighbourhood took it to 26.37 ms on a selection frame. The tensor, response and cell stages now run on all threads on rows that do not depend on each other, and the last stage scans a vector at a time and orders candidates by a radix sort over the complement of their score's bits, integers only. 3.78 ms. Reseeding now counts members, not riders, and waits at least 4 frames.
+
+**Appearance search reaches as far in the picture at any level.** It counted pixels of its own level, so at 1/8 scale it reached 288 px (arithmetic), and took a region 160 px away live.
+
 ## Three cameras (user's direction, 2026-11-03)
 
 | Camera | Where | Mode | Role |

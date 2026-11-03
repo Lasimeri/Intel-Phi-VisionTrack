@@ -6,7 +6,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-static const char *const names[SC_COUNT] = {"translate", "shapes", "camera", "brightness", "noise", "occlusion", "loss", "leave", "helix", "linear3d", "repeat", "flat", "glitch", "dual"};
+static const char *const names[SC_COUNT] = {"translate", "shapes", "camera", "brightness", "noise", "occlusion", "loss", "leave", "helix", "linear3d", "repeat", "flat", "glitch", "bigbox", "hold", "smallbox", "stillstart", "rotate", "swing", "dual"};
 
 const char *scene_name(enum scene_id id) { return names[id]; }
 
@@ -57,7 +57,21 @@ struct motion {
     double gain, offset;
     double noise;
     double second_x; /* a second, independent moving rectangle's X, in shapes */
+    double spin;     /* the object's turn in the image plane, radians */
 };
+
+/* A point of the world, relative to the object's centre, in the object's own axes. */
+static inline void unturn(const struct motion *m, double *lx, double *ly)
+{
+    if (m->spin != 0.0) {
+        const double c = cos(m->spin), s = sin(m->spin), x = *lx, y = *ly;
+        *lx = c * x + s * y;
+        *ly = c * y - s * x;
+    }
+}
+
+/* The background as busy as the object, so that features on it are as good as features on the object. */
+static inline int busy_background(const struct scene *s) { return s->id == SC_BIGBOX || s->id == SC_SMALLBOX || s->id == SC_STILLSTART || s->id == SC_ROTATE || s->id == SC_SWING; }
 
 static void motion_at(const struct scene *s, double t, struct motion *m)
 {
@@ -93,6 +107,32 @@ static void motion_at(const struct scene *s, double t, struct motion *m)
         m->Vx = 0.2;
         m->gain = 1.0 + 0.25 * sin(1.3 * t);
         m->offset = 16.0 * sin(0.7 * t);
+        break;
+    case SC_BIGBOX:
+        m->X = -0.6 + 0.3 * t;
+        m->Vx = 0.3;
+        break;
+    case SC_HOLD:
+        m->noise = 4.0;
+        break;
+    case SC_SMALLBOX:
+        m->X = -0.6 + 0.3 * t;
+        m->Vx = 0.3;
+        m->halfx = 0.25;
+        m->halfy = 0.2;
+        break;
+    case SC_STILLSTART:
+        m->X = t < 2.0 ? -0.3 : -0.3 + 0.3 * (t - 2.0);
+        m->Vx = t < 2.0 ? 0.0 : 0.3;
+        break;
+    case SC_ROTATE:
+        m->X = -0.6 + 0.2 * t;
+        m->Vx = 0.2;
+        m->spin = 30.0 * M_PI / 180.0 * t;
+        break;
+    case SC_SWING:
+        m->X = 1.2 * sin(3.0 * t);
+        m->Vx = 3.6 * cos(3.0 * t);
         break;
     case SC_NOISE:
         m->X = -0.6 + 0.2 * t;
@@ -218,7 +258,8 @@ static inline double shade(const struct scene *s, const struct motion *m, double
     }
     {
         const double X = ox + rx * m->Z, Y = oy + ry * m->Z;
-        const double lx = X - m->X, ly = Y - m->Y;
+        double lx = X - m->X, ly = Y - m->Y;
+        unturn(m, &lx, &ly);
         const int in = m->disc ? (lx * lx + ly * ly <= m->halfy * m->halfy) : (fabs(lx) <= m->halfx && fabs(ly) <= m->halfy);
         if (in)
             return object_surface(s, lx, ly);
@@ -233,6 +274,8 @@ static inline double shade(const struct scene *s, const struct motion *m, double
     /* The background, 12 m away, still in the world. */
     const double Zb = 12.0;
     const double X = ox + rx * Zb, Y = oy + ry * Zb;
+    if (busy_background(s))
+        return texture(X, Y, 0.30, 31);
     return 40.0 + 0.6 * texture(X, Y, 0.45, 31);
 }
 
@@ -375,10 +418,19 @@ int scene_map_left(const struct scene *s, int f0, double x0, double y0, int f1, 
             return 0;
     }
     const double X = a.camX + rx * a.Z, Y = a.camY + ry * a.Z;
-    const double lx = X - a.X, ly = Y - a.Y;
-    const int in = a.disc ? (lx * lx + ly * ly <= a.halfy * a.halfy) : (fabs(lx) <= a.halfx && fabs(ly) <= a.halfy);
-    if (!in)
-        return 0;
+    double lx = X - a.X, ly = Y - a.Y;
+    {
+        double ox = lx, oy = ly;
+        unturn(&a, &ox, &oy);
+        const int in = a.disc ? (ox * ox + oy * oy <= a.halfy * a.halfy) : (fabs(ox) <= a.halfx && fabs(oy) <= a.halfy);
+        if (!in)
+            return 0;
+    }
+    if (b.spin != a.spin) {
+        const double c = cos(b.spin - a.spin), sn = sin(b.spin - a.spin), px = lx, py = ly;
+        lx = c * px - sn * py;
+        ly = sn * px + c * py;
+    }
     const double Xb = b.X + lx - b.camX, Yb = b.Y + ly - b.camY;
     *x1 = s->f * Xb / b.Z + s->cx;
     *y1 = s->f * Yb / b.Z + s->cy;

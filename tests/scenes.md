@@ -19,6 +19,12 @@ Every scene, always: a hidden region never reads as observed, and the track id d
 | glitch | the right image jumps 14 px for 10 frames | | | | | the gate rejects; filter stays within 20 mm |
 | repeat | 2D periodic texture, period inside the disparity range | | | | | reported ambiguous; ambiguity, not rejection, stops it |
 | flat | no texture | | | | | selection refused, nothing observed |
+| bigbox | a box 2.4 times the object, over a background as busy as the object: what an operator's drag really holds | >= 0.95 | | <= 4 px | | centre p95 <= 12 px |
+| smallbox | a box 4 times a smaller object: most of the box and of its middle is background | >= 0.95 | | <= 4 px | | centre p95 <= 12 px |
+| stillstart | as bigbox, still for 2 s after selection and only then moving: nothing tells it from the background until it does | >= 0.95 | | <= 4 px | | centre p95 <= 12 px |
+| rotate | as bigbox, turning 30 degrees a second: no cluster of motion to find | >= 0.95 | | <= 4 px | | centre p95 <= 12 px |
+| swing | as bigbox, swinging to and fro, up to 19 px a frame | >= 0.95 | | <= 4 px | | centre p95 <= 12 px |
+| hold | a still object under noise of sigma 4: any travel of the region is error | >= 0.99 | | <= 0.5 px | | centre p95 <= 1 px |
 | dual | two independently tracked views, rotated, focal lengths differ, shutter 11 ms apart; TRUE calibration given (`scene.sh dual 640x480 --dual --gate`) | see `score_gate` | | | <= 15 mm | proves the fusion mechanism, not any calibration. Set from the measured 11.20 mm at 4 m with little parallax: the first limit, 10 mm, was written before the scene had ever run and failed it |
 
 The depth map has no scene here, by the user's direction: it runs on the real room, which has no per-pixel truth. Its checks are in [measurements.md](../docs/measurements.md): card against host hash over real frames (a gate in `check.sh`, where those frames exist), a deliberately rotated pose must lose, the sweep's depth against depths triangulated from landmarks (`vt_mapcheck`), and physical sizes.

@@ -445,11 +445,11 @@ static void *link_main(void *arg)
                     strftime(path, sizeof path, "logs/live/track-%Y%m%d-%H%M%S.csv", &tm);
                     track_csv = fopen(path, "w");
                     if (track_csv)
-                        fprintf(track_csv, "acq_s,camera,instance,state,flags,epoch,cx,cy,meas_x,meas_y,meas_z,reproj_px,parallax_deg,gap_ms,nis,pos_x,pos_y,pos_z,vel_x,vel_y,vel_z,sig_x,sig_y,sig_z,age_s\n");
+                        fprintf(track_csv, "acq_s,camera,instance,state,flags,epoch,cx,cy,meas_x,meas_y,meas_z,reproj_px,parallax_deg,gap_ms,nis,pos_x,pos_y,pos_z,vel_x,vel_y,vel_z,sig_x,sig_y,sig_z,age_s,w,h,nfeat,inliers,reacq_ncc\n");
                 }
                 if (track_csv) {
                     const struct vt_result *q = &K->last;
-                    fprintf(track_csv, "%.6f,%u,%llu,%u,%u,%u,%.3f,%.3f,%.5f,%.5f,%.5f,%.3f,%.3f,%.3f,%.3f,%.5f,%.5f,%.5f,%.5f,%.5f,%.5f,%.5f,%.5f,%.5f,%.4f\n", (double)q->hdr.acq_ns * 1e-9, k, (unsigned long long)q->hdr.instance, q->state, q->flags, A.pair_epoch, (double)q->cx, (double)q->cy, q->meas[0], q->meas[1], q->meas[2], q->reproj_rms, q->parallax_deg, q->pair_gap_ms, q->nis, q->pos[0], q->pos[1], q->pos[2], q->vel[0], q->vel[1], q->vel[2], sqrt(q->pos_cov[0]), sqrt(q->pos_cov[4]), sqrt(q->pos_cov[8]), q->age_s);
+                    fprintf(track_csv, "%.6f,%u,%llu,%u,%u,%u,%.3f,%.3f,%.5f,%.5f,%.5f,%.3f,%.3f,%.3f,%.3f,%.5f,%.5f,%.5f,%.5f,%.5f,%.5f,%.5f,%.5f,%.5f,%.4f,%.1f,%.1f,%u,%.3f,%.3f\n", (double)q->hdr.acq_ns * 1e-9, k, (unsigned long long)q->hdr.instance, q->state, q->flags, A.pair_epoch, (double)q->cx, (double)q->cy, q->meas[0], q->meas[1], q->meas[2], q->reproj_rms, q->parallax_deg, q->pair_gap_ms, q->nis, q->pos[0], q->pos[1], q->pos[2], q->vel[0], q->vel[1], q->vel[2], sqrt(q->pos_cov[0]), sqrt(q->pos_cov[4]), sqrt(q->pos_cov[8]), q->age_s, (double)q->w, (double)q->h, q->nfeat, (double)q->inliers, (double)q->reacq_ncc);
                     fflush(track_csv);
                 }
             }
@@ -630,7 +630,7 @@ static void draw_view(struct x11view *v, int ox, int oy, const struct cam *K, co
         /* A vector eight times its length, from where the feature was: a pixel of motion is visible. */
         outline_line(v, fx, fy, show_x(ox, K->w, (double)(f->x - 8.0f * f->u)), fy - (int)(8.0f * f->v), GREY, 0);
         x11view_fill(v, fx - 2, fy - 2, 5, 5, BLACK);
-        x11view_fill(v, fx - 1, fy - 1, 3, 3, (f->flags & VT_FF_NEW) ? GREY : WHITE);
+        x11view_fill(v, fx - 1, fy - 1, 3, 3, (f->flags & VT_FF_MEMBER) ? WHITE : GREY);
     }
 }
 

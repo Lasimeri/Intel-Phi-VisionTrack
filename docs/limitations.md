@@ -1,9 +1,13 @@
 # Known limitations
 
-Current as of 2026-11-03 07:00. Numbers and their sources: [measurements.md](measurements.md). Items leave this list only with a measurement.
+Current as of 2026-11-03 08:15. Numbers and their sources: [measurements.md](measurements.md). Items leave this list only with a measurement.
 
 ## Failing, or not built
 
+- **Holding a selected thing has known truth only in synthetic scenes.** The scenes have no motion blur, no change of shape and no change of light on the thing, and the fastest is 19 px a frame. Live there is no truth for a moving target: only still targets have a number, and how far real fast movers go is unmeasured.
+- **A still target in L still creeps,** far less than it did: +1.34, +0.46 px over 42 s, against +21.5, +13.1 px. R, same test: +0.15, +0.05 px. Each feature is still tracked frame to frame, so a bias in its flow stays in its position. The cause in L is not found. Tracking still members against a held frame instead of the last one should end it: not built.
+- **A taken-back region is believed at once.** Appearance search above correlation 0.75 reads OBSERVED on that frame, with no second look. Its reach is now bounded in the picture (36 px at most), which rules out the 160 px jump that was seen, not a lookalike within reach.
+- **A second moving thing already in the middle of the box when selected can win.** The operator's box says nothing more about which was meant; features of something arriving later are riders and cannot.
 - **The depth map does not yet tie L and R to D properly, and today it is mostly speckle.** D+R and D+L agree within a step on 5.6 to 7.2 % of the pixels both are sure of (chance 3.2 %), with someone in view; 50 % in the empty room, and there only on the near chair. The far wall has never agreed. Too few planes and a wrong D pose are both shown to contribute, neither is the whole answer, and neither fix is live ([measurements.md](measurements.md)).
 - **The map's planes are still 64.** It needs about 256 (about 28 ms more per map, arithmetic), which level 1 flow has room for, at about 367 ms of the session's thread a second. Not done yet.
 - **A frame landing during background work still waits for it,** up to about 10.5 ms behind a map: tracking comes first between jobs, not within one. That the flow, rather than the tracker, gives way under overload has not been seen, since nothing has been overloaded since the change.

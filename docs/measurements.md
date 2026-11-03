@@ -470,3 +470,47 @@ A frame that lands during a job still waits for that job, up to about 10.5 ms be
 **All gates:** `scripts/check.sh`, `logs/check/20261103-070644.txt` on the build with tracking first: 36 passed, 0 failed, 0 skipped, with the attitude kernel over real frames card = host. The gate runs the flow at level 2, as `vt_m3` always has; native flow on the card is measured live, as above, not by a hash.
 
 **R re-anchored after the knock**, once, by landmarks carried from the old R picture to the new by correlation (`--transfer`, `--solve-r`): wall points correlate 0.66 to 0.985 from night to day. Tilt -0.274, pan -9.222, roll -0.369 degrees, 2.19 px rms over 9 points at 4.0 to 4.8 m. The landmarks then land 14.9 mm from where they were, which restates the residual and is not independent; near objects are untested, and any move of R's centre is unmeasured. D was not moved at all: its landmarks are where they were.
+
+## Holding a selected region (2026-11-03 07:30 to 08:10, card; scenes 640x480, 150 frames; raw `results/runs/`)
+
+**The old tracker on a box like an operator's.** Scene `bigbox` (box 2.4 times the object, background as busy as the object): centre error median 74.376 px, p95 176.775, max 187.975, continuity 1.0000, 144 of 144 frames reading OBSERVED, frozen at x 273.9 while the truth walked from 231.5 at selection to about 462 (arithmetic). Nothing had shown this: every earlier scene selected from inside the object.
+
+**Why, in order found:**
+
+| Cause | Measured |
+| --- | --- |
+| One corner threshold for the box: the Harris response goes as the gradient to the fourth power, so the outline's corners erase the inside's | 11 corners in 384 x 307. Those straddle two motions: the region moved 1.31 px a frame where truth moved 1.60, EPE 0.30 px |
+| A median over all features: the background's motion when background is the majority | the frozen run above |
+| Detection on the tracking thread | 6.1 to 8.0 ms each on 384 x 307, on every frame while features were low (frames 5, 6, 8, 24, 38, 40, 56 of that run, among others). About 24 to 30 ms on the largest box an operator has drawn, 924 x 484 (arithmetic, by area) |
+| Search for a lost region counted in pixels of its own level | 288 px of reach at 1/8 (arithmetic); a 160 px jump, live |
+| Reseeding counted riders, every frame | features 13, 126, 15, 128 and a detection every second frame, live, 433 x 537 box |
+
+**The new region model** ([architecture.md](architecture.md)). Card, replay against the host identical on every line:
+
+| Scene | What it provokes | Centre median | p95 | max | Continuity | EPE median |
+| --- | --- | --- | --- | --- | --- | --- |
+| bigbox | box 2.4 x the object | 0.053 px | 0.076 | 0.368 | 1.0000 | 0.0067 px |
+| smallbox | box 4 x a smaller object | 0.270 | 0.326 | 4.736 | 1.0000 | 0.0071 |
+| stillstart | still 2 s after selection, then moves | 0.053 | 0.072 | 0.218 | 1.0000 | 0.0027 |
+| rotate | turning 30 degrees a second | 0.388 | 0.608 | 2.595 | 1.0000 | 0.0417 |
+| swing | to and fro, up to 19 px a frame | 0.002 | 0.006 | 0.015 | 1.0000 | 0.0052 |
+| hold | still under noise of sigma 4 (the old tracker, over 450 frames: 0.076, 0.099, 0.117) | 0.049 | 0.065 | 0.073 | 1.0000 | 0.0589 |
+
+**These centres flatter the method by one thing:** each scene's box is centred on the object, and the region keeps the operator's centre when it lies on the thing, so the centre starts exactly right. What they measure is that it stays there. An off-centre drag keeps its offset by design.
+
+**They also spare it:** no motion blur, no change of shape, no change of light on the object.
+
+**Wrong turns, with their numbers.** New features voting at a quarter weight and on motion remembered over 8 frames: still frozen, 64.9 px. Holding them out of the vote by age, with a fall back to all when too few: died at frame 47, continuity 0.29. A second thing found as a clump of claims under the old model: a turning object has no clump, and the region stayed on the background, 144.6 px. Moving the centre to the middle of the survivors on closing: 24 to 43 px on `rotate`, for throwing away the point that was selected.
+
+**Detection on the team:** judging corners by neighbourhood, with the selection's two passes, cost 26.37 ms on one thread, and 3.78 ms on the team, 7.0 times, same box, one run each. Against the old 6.25 ms on that frame, which found 11 corners where this finds 128 (`results/runs/20261103-071854-bigbox.csv`, column `us_region`).
+
+**All gates:** `scripts/check.sh`, `logs/check/20261103-080347.txt`: 42 passed, 0 failed, 0 skipped, with the six new scenes among them (`results/runs/20261103-0806*`). The old tracker's frozen run is `results/runs/20261103-071854-bigbox.json`.
+
+**A still target, live, the same two posters as before, 42 s** (`logs/live/track-20261103-071056.csv` before, `logs/live/track-20261103-075213.csv` after, one run each):
+
+| Camera | Results observed, before and after | Centre std before | after | First to last fifth before | after |
+| --- | --- | --- | --- | --- | --- |
+| R | 1,290, 1,261 | 0.13, 0.21 px | 0.059, 0.058 px | not recorded | +0.145, +0.049 px |
+| L | 1,287, 1,260 | 6.31, 4.02 px | 0.518, 0.172 px | +21.5, +13.1 px over 39 s | +1.340, +0.456 px |
+
+**L still creeps,** +3.4, +3.0 px over 126 s of the same run, steadily, where R wanders within 0.27 px with no direction. An earlier statement in the project's notes that L's error was a random walk was wrong: the first run's numbers show a steady crawl. An LED in L's view moved -0.6, +0.7 px over the same stretch (`logs/live/attitude-20261103-074057.csv`), so at most a small part of it is the whole picture moving. Flow bias accumulating frame to frame and real change on the target are not yet told apart.
