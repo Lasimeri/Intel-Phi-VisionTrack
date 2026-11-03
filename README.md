@@ -16,7 +16,7 @@ Built on [Intel-Phi-7120A](https://github.com/Lasimeri/Intel-Phi-7120A) and [Int
 | M2 optical-flow tracking | **kernel and tracking run on the card**, including reacquisition after full occlusion | [measurements](docs/measurements.md) |
 | M3 stereo reconstruction | **runs on the card, 1 to 2 mm RMSE on synthetic scenes**; ambiguity reported, gate fires | [measurements](docs/measurements.md) |
 | M4 temporal state estimation | **runs on the card**; covariance not calibrated | [measurements](docs/measurements.md) |
-| M5 live visualization, integration | **three cameras and a depth map live on the card** (L + R 1080p30, D 720p15; 15.9 maps/s at 9.8 ms, 18.41 % of textured pixels confident); LED star tracker live; the card's vectors gate the depth map's averaging; **geometry solved from the real room and judged correct by the user's eye, no measured ground truth; the gate not yet evaluated on live movement; geometry not yet adjusted from motion** | [measurements](docs/measurements.md) |
+| M5 live visualization, integration | **three cameras and a depth map live on the card** (L + R 1080p30, D 720p15; 15.9 maps/s at 9.8 ms, 18.41 % of textured pixels confident); LED star tracker live; the card's vectors gate the depth map's averaging; **geometry solved from the real room and judged correct by the user's eye, no measured ground truth; two cameras since knocked, so it is being solved again; geometry not yet adjusted from motion** | [measurements](docs/measurements.md) |
 | M6 optimization, validation | partial | [limitations](docs/limitations.md) |
 
 Open items: [limitations](docs/limitations.md). Design: [architecture](docs/architecture.md).

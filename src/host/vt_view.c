@@ -94,6 +94,8 @@ struct cam {
     double att[3];             /* the attitude last seen: it coasts while the lights are hidden */
     double att_applied[3];     /* what the geometry has been corrected for */
     int att_pending;
+    /* All of the above belongs to the navigation thread. This is what the window may see of it, under A.m. */
+    struct nav_view { int used, known, unsure; double gdop, att[2]; time_t moved; } nav;
 };
 
 static struct {
@@ -655,7 +657,7 @@ static void draw_epipolar(struct x11view *v, const struct vt_calib *c, const str
 }
 
 /* Top-down: the reconstructed path, camera A at the bottom, the bar one metre. */
-static void draw_trail(struct x11view *v, int x, int y, int size)
+static void draw_trail(struct x11view *v, int x, int y, int size, const struct vt_calib *calib)
 {
     x11view_fill(v, x, y, size, size, 0x0c0c0cu);
     x11view_dash(v, x + size / 2, y, x + size / 2, y + size, 0x303030u, 2, 6);
@@ -666,8 +668,8 @@ static void draw_trail(struct x11view *v, int x, int y, int size)
     x11view_text(v, cx + 6, cy - 6, 1, DIM, "camera A");
     x11view_fill(v, x + 8, y + 8, (int)px_per_m, 2, DIM);
     x11view_text(v, x + 8, y + 12, 1, DIM, "1 m");
-    if (A.calib.valid) {
-        const double *R = A.calib.R, *T = A.calib.T;
+    if (calib->valid) {
+        const double *R = calib->R, *T = calib->T;
         const double C[3] = {-(R[0] * T[0] + R[3] * T[1] + R[6] * T[2]), -(R[1] * T[0] + R[4] * T[1] + R[7] * T[2]), -(R[2] * T[0] + R[5] * T[1] + R[8] * T[2])};
         const int bx = cx + (int)(C[0] * side), by = cy - (int)(C[2] * px_per_m);
         if (bx > x && bx < x + size && by > y && by < y + size) {
@@ -675,8 +677,8 @@ static void draw_trail(struct x11view *v, int x, int y, int size)
             x11view_text(v, bx + 6, by - 3, 1, DIM, "camera B");
         }
     }
-    if (A.calib.valid_d) {
-        const double *R = A.calib.Rd, *T = A.calib.Td;
+    if (calib->valid_d) {
+        const double *R = calib->Rd, *T = calib->Td;
         const double C[3] = {-(R[0] * T[0] + R[3] * T[1] + R[6] * T[2]), -(R[1] * T[0] + R[4] * T[1] + R[7] * T[2]), -(R[2] * T[0] + R[5] * T[1] + R[8] * T[2])};
         const int bx = cx + (int)(C[0] * side), by = cy - (int)(C[2] * px_per_m);
         if (bx > x && bx < x + size && by > y && by < y + size) {
@@ -684,7 +686,7 @@ static void draw_trail(struct x11view *v, int x, int y, int size)
             x11view_text(v, bx + 6, by - 3, 1, DIM, "camera D");
         }
         if (A.map_seq)
-            dv_cloud(v, map_store[A.map_i], &A.calib, x, y, size, cx, cy, side, px_per_m);
+            dv_cloud(v, map_store[A.map_i], calib, x, y, size, cx, cy, side, px_per_m);
     }
     int lx = 0, ly = 0, have = 0;
     for (int i = 0; i < A.trail_n; i++) {
@@ -961,10 +963,10 @@ static void rig_tick(void)
     }
 }
 
-/* Geometry solved before a primary camera last moved describes a rig that no longer exists. */
+/* Geometry solved before a primary camera last moved describes a rig that no longer exists. With A.m held. */
 static int calib_stale(void)
 {
-    return A.calib.valid && (A.c[0].rig_moved > A.calib_mtime || A.c[1].rig_moved > A.calib_mtime);
+    return A.calib.valid && (A.c[0].nav.moved > A.calib_mtime || A.c[1].nav.moved > A.calib_mtime);
 }
 
 static void load_calibration(void)
@@ -990,7 +992,9 @@ static void load_calibration(void)
     struct vt_calib c;
     if (calib_read(CALIB_PATH, &c)) {
         fprintf(stderr, "vt_view: %s is unreadable\n", CALIB_PATH);
+        pthread_mutex_lock(&A.m);
         A.calib_mtime = st.st_mtime;
+        pthread_mutex_unlock(&A.m);
         return;
     }
     /* The file's first line says what its scale rests on: the panel shows exactly that. */
@@ -1017,6 +1021,29 @@ static void load_calibration(void)
     memcpy(A.calib_note, note, sizeof note);
     pthread_mutex_unlock(&A.m);
     fprintf(stderr, "vt_view: calibration loaded: fa %.1f fb %.1f baseline %.3f m\n", c.fa, c.fb, sqrt(c.T[0] * c.T[0] + c.T[1] * c.T[1] + c.T[2] * c.T[2]));
+}
+
+/* Everything that reads whole frames once a second, on a thread of its own. On the window's thread it stopped the drawing for 33 to 40 ms at every tick, 2 or 3 displayed frames lost each second
+ * (measured, docs/measurements.md), with the cameras and the card running steadily behind it. The window sees only what is published here. */
+static void *nav_main(void *arg)
+{
+    (void)arg;
+    struct timespec next;
+    clock_gettime(CLOCK_MONOTONIC, &next);
+    while (!A.quit) {
+        load_calibration();
+        star_tick();
+        rig_tick();
+        pthread_mutex_lock(&A.m);
+        for (int k = 0; k < A.ncam; k++) {
+            struct cam *K = &A.c[k];
+            K->nav = (struct nav_view){K->fix.used, K->fix.known, K->rig_unsure, K->fix.gdop, {K->att[0], K->att[1]}, K->rig_moved};
+        }
+        pthread_mutex_unlock(&A.m);
+        next.tv_sec++;
+        clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &next, NULL);
+    }
+    return NULL;
 }
 
 int main(int argc, char **argv)
@@ -1110,8 +1137,9 @@ int main(int argc, char **argv)
     }
     for (int k = 0; k < A.ncam; k++)
         pthread_create(&A.c[k].thread, NULL, capture_main, &A.c[k]);
-    pthread_t lt;
+    pthread_t lt, nt;
     pthread_create(&lt, NULL, link_main, NULL);
+    pthread_create(&nt, NULL, nav_main, NULL);
 
     int dragging = 0, drag_cam = 0, dx0 = 0, dy0 = 0, dx1 = 0, dy1 = 0;
     struct rate r_draw = {0, 0, 0.0};
@@ -1190,7 +1218,7 @@ int main(int argc, char **argv)
         }
         apply_command_file();
         const double t = now_s();
-        /* Once a second: where the user has put the window (for the next restart with new code), and any new calibration. */
+        /* Once a second: where the user has put the window, for the next restart with new code. */
         if (t - place_t > 1.0) {
             place_t = t;
             int px, py;
@@ -1199,9 +1227,6 @@ int main(int argc, char **argv)
                 fprintf(pf, "%d,%d\n", px, py);
                 fclose(pf);
             }
-            load_calibration();
-            star_tick();
-            rig_tick();
         }
         int fresh = 0;
         uint64_t caps[VT_MAX_CAMERAS] = {0, 0, 0};
@@ -1225,6 +1250,12 @@ int main(int argc, char **argv)
         const uint64_t dropped = A.dropped, exc = A.exceptions, card_build = A.card_build, pairs = A.pairs;
         const int view_level = A.view_level, contrast = A.contrast, pre_gauss = A.pre_gauss, feat = A.feat;
         const struct vt_calib calib = A.calib;
+        const int stale = calib_stale();
+        struct nav_view nav[VT_MAX_CAMERAS];
+        char calib_note[sizeof A.calib_note];
+        for (int k = 0; k < A.ncam; k++)
+            nav[k] = A.c[k].nav;
+        memcpy(calib_note, A.calib_note, sizeof calib_note);
         const uint64_t map_seq = A.map_seq;
         const void *map = map_seq ? map_store[A.map_i] : NULL;
         const int save_map = A.save_map, vectors_all = A.vectors_all;
@@ -1291,7 +1322,7 @@ int main(int argc, char **argv)
         }
         if (A.ncam == 3) {
             x11view_fill(&v, depth_pane.x, depth_pane.y, depth_pane.w, depth_pane.h, 0x0c0c0cu);
-            const int live = tracking && map && calib.valid && calib.valid_d && !calib_stale();
+            const int live = tracking && map && calib.valid && calib.valid_d && !stale;
             if (live) {
                 const struct vt_depth_out *h = map;
                 dv_pane(&v, map, depth_pane.x, depth_pane.y, depth_pane.w, depth_pane.h, A.mirror);
@@ -1343,10 +1374,9 @@ int main(int argc, char **argv)
             int at = snprintf(rig, sizeof rig, "cameras:");
             const time_t now_wall = time(NULL);
             for (int k = 0; k < A.ncam && at < (int)sizeof rig; k++) {
-                const struct cam *K = &A.c[k];
-                if (K->rig_moved && now_wall - K->rig_moved < 30)
-                    at += snprintf(rig + at, sizeof rig - (size_t)at, " %c MOVED %llds ago", "LRD"[k], (long long)(now_wall - K->rig_moved));
-                else if (K->rig_unsure)
+                if (nav[k].moved && now_wall - nav[k].moved < 30)
+                    at += snprintf(rig + at, sizeof rig - (size_t)at, " %c MOVED %llds ago", "LRD"[k], (long long)(now_wall - nav[k].moved));
+                else if (nav[k].unsure)
                     at += snprintf(rig + at, sizeof rig - (size_t)at, " %c unsure", "LRD"[k]);
                 else
                     at += snprintf(rig + at, sizeof rig - (size_t)at, " %c still", "LRD"[k]);
@@ -1357,11 +1387,10 @@ int main(int argc, char **argv)
             char line[96], line2[96];
             int at = snprintf(line, sizeof line, "lights:"), at2 = snprintf(line2, sizeof line2, "turned deg:");
             for (int k = 0; k < A.ncam; k++) {
-                const struct cam *K = &A.c[k];
-                at += snprintf(line + at, sizeof line - (size_t)at, " %c %d/%d", "LRD"[k], K->fix.used, K->fix.known);
-                if (K->fix.gdop > 0.0)
-                    at += snprintf(line + at, sizeof line - (size_t)at, " gdop %.3f", K->fix.gdop);
-                at2 += snprintf(line2 + at2, sizeof line2 - (size_t)at2, " %c%+.2f%+.2f", "LRD"[k], K->att[0] * 180.0 / M_PI, K->att[1] * 180.0 / M_PI);
+                at += snprintf(line + at, sizeof line - (size_t)at, " %c %d/%d", "LRD"[k], nav[k].used, nav[k].known);
+                if (nav[k].gdop > 0.0)
+                    at += snprintf(line + at, sizeof line - (size_t)at, " gdop %.3f", nav[k].gdop);
+                at2 += snprintf(line2 + at2, sizeof line2 - (size_t)at2, " %c%+.2f%+.2f", "LRD"[k], nav[k].att[0] * 180.0 / M_PI, nav[k].att[1] * 180.0 / M_PI);
             }
             panel_line(&v, &y, GREY, "%s", line);
             panel_line(&v, &y, GREY, "%s", line2);
@@ -1391,7 +1420,7 @@ int main(int argc, char **argv)
         } else if (!calib.valid) {
             panel_line(&v, &y, GREY, "UNAVAILABLE: no calibration yet");
             panel_line(&v, &y, DIM, "correspondences so far: %llu", (unsigned long long)pairs);
-        } else if (calib_stale()) {
+        } else if (stale) {
             /* No number at all: a position computed through a pose the rig has left only looks like a measurement. */
             panel_line(&v, &y, WHITE, "UNAVAILABLE: GEOMETRY STALE");
             panel_line(&v, &y, GREY, "L or R moved after it was solved");
@@ -1403,7 +1432,7 @@ int main(int argc, char **argv)
             panel_line(&v, &y, WHITE, "V %+6.3f    %+6.3f    %+6.3f m/s", m3->vel[0], m3->vel[1], m3->vel[2]);
             panel_line(&v, &y, GREY, "+- %5.3f    %5.3f    %5.3f", sqrt(m3->vel_var[0]), sqrt(m3->vel_var[1]), sqrt(m3->vel_var[2]));
             panel_line(&v, &y, GREY, "rays %.1f deg apart, miss %.1f px, gap %.1f ms", r[1].parallax_deg, r[1].reproj_rms, r[1].pair_gap_ms);
-            panel_line(&v, &y, DIM, "%.72s", A.calib_note);
+            panel_line(&v, &y, DIM, "%.72s", calib_note);
         } else {
             panel_line(&v, &y, GREY, "UNAVAILABLE: select the region in L and in R");
         }
@@ -1421,13 +1450,14 @@ int main(int argc, char **argv)
             panel_line(&v, &y, GREY, " drift, camera px: L %+.2f%+.2f R %+.2f%+.2f D %+.2f%+.2f", 4.0 * (double)h->cam[0].drift_u, 4.0 * (double)h->cam[0].drift_v, 4.0 * (double)h->cam[1].drift_u, 4.0 * (double)h->cam[1].drift_v, 4.0 * (double)h->cam[2].drift_u, 4.0 * (double)h->cam[2].drift_v);
         }
         if (A.ncam >= 2)
-            draw_trail(&v, side_x, panel.y + 10, trail_size);
+            draw_trail(&v, side_x, panel.y + 10, trail_size, &calib);
         static const char *const help[] = {"drag: select, in each view", "right click, d: deselect", "v: view   c: contrast", "g: blur   f: all vectors", "m: mirror   [ ]: features   q: quit"};
         for (int i = 0; i < 5; i++)
             x11view_text(&v, side_x, panel.y + trail_size + 24 + 20 * i, 2, DIM, help[i]);
         x11view_present(&v);
     }
     pthread_join(lt, NULL);
+    pthread_join(nt, NULL);
     for (int k = 0; k < A.ncam; k++)
         pthread_join(A.c[k].thread, NULL);
     x11view_close(&v);

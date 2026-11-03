@@ -329,7 +329,7 @@ Still-room noise from one saved map (`vt_mapstat`): |frame - mean| median L 1.50
 
 **All gates on the final binaries:** `scripts/check.sh`, `logs/check/20261103-025752.txt`: 36 passed, 0 failed, 0 skipped, including the real-frame gate above and the `dual` scene against its limit of 15 mm, set from the measured 11.20. `make compdb`: 88 files, 0 diagnostics. Audit of every card program: 0 illegal, 0 suspect.
 
-**The gate on a real change of scene:** that sequence's last frame is another pose. Before the whole-picture rule only 332 of 1,020 cells flagged, the noise-relative limit having risen with the median. After it R flags 1,020, but L still 332 and D 242: nine frames with movement in them leave those two's usual noise high enough to stay under it. So the rule works in one camera of three on this test. **Not yet evaluated on movement live:** the first such run began about 05:10 on 2026-11-03 and has not been analysed.
+**The gate on a real change of scene:** that sequence's last frame is another pose. Before the whole-picture rule only 332 of 1,020 cells flagged, the noise-relative limit having risen with the median. After it R flags 1,020, but L still 332 and D 242: nine frames with movement in them leave those two's usual noise high enough to stay under it. So the rule works in one camera of three on this test. **Live movement:** see "The rig knocked" below; whether the flagged cells are where things moved has not been checked.
 
 **Against landmarks** (`vt_mapcheck MAP CALIB input/calib/triples-pose3.txt`, the 22 s apart maps 444 and 774). Not independent: the armrest tips and LEDs helped place D. It shows whether the sweep and the triangulation agree.
 
@@ -346,4 +346,37 @@ The offsets in the last column are open: x always positive, y changing sign betw
 
 **Repeatability**, maps 444 and 774, an empty room: 1,605 pixels confident in both, 279 in one only; |dz| p50 0.3 mm, p90 1.5, p99 8.2; 100 % within one plane. That is stability, not accuracy.
 
-**The user's verdict (2026-11-03 05:10):** having seen the live result in the room itself, the user judged the geometry correct ("perfect"). That is the one independent check so far and it is by eye: there is still no tape measure of the baseline, and the offsets above stay unexplained.
+**The user's verdict (2026-11-03 05:10):** having seen the live result in the room itself, the user judged the geometry correct ("perfect"). That is the one independent check so far and it is by eye: there is still no tape measure of the baseline, and the offsets above stay unexplained. It can only describe the geometry from before the knocks below, the first of which came 11 minutes earlier.
+
+## The rig knocked (2026-11-03 04:59 to 05:30)
+
+`logs/live/depth-20261103-025323.csv`, `stars-20261103-025322.csv`. Cameras R and D were knocked out of position; L was not.
+
+| | Value |
+| --- | --- |
+| Before, 108,628 maps | confident mean 18.60 %, min 9.13, max 20.06; moving cells about 0.2 per camera per map |
+| R | first star fix over 15 px 04:59:36, every fix for 60 s by 05:01:02; first whole-camera restart 04:59:48 |
+| D | first whole-camera restart 05:10:30, first star fix over 15 px 05:10:41, every fix for 60 s by 05:17:42 |
+| L | one star fix over 15 px at 05:10:47, never for 60 s |
+| Newest fixes | R pan -11.0, roll 1.0, tilt 0.07 degrees, 3 lights, residual 1.2 px. D tilt -17.7, pan 6.7, 2 lights, residual 12.8 px, so D's size is doubtful |
+| Whole-camera restarts | L 2 maps, R 19, D 276: the first live data for that rule, against one camera of three on the saved frames above |
+| Moving cells | up to 130 a map, minute mean; back to 1.4, 3.9, 4.5 in a quiet spell |
+| After | confident 5.5 to 8 %, about what a deliberately rotated D read offline (4.41 to 7.16 %) |
+
+The window said so as designed: "GEOMETRY STALE", no 3D numbers. Consistent with stale geometry, not proof of it, and the textured count rose at the same time (8,950 to 13,620 and later 28,947), so D's view or the room's light changed too. No epipolar or motion analysis may use this window: its geometry was stale.
+
+## The window's freezes (2026-11-03 05:39 to 05:47)
+
+Reported by the user as periodic freezes. Measured without touching the process: each thread's run time from `/proc/PID/task/TID/schedstat`, sampled about every millisecond, one run each way.
+
+| | Draw thread, before | Draw thread, after |
+| --- | --- | --- |
+| Runs over 16 ms without a break | 44 in 44 s | **0 in 30 s** |
+| Their length | 33 to 40 ms, median 36 to 37 | |
+| Their period | 1.00 s | |
+| Blocked over 30 ms | 0 | 0 |
+| CPU | 23.8 to 24.0 % | 22.7 % |
+
+**Cause:** `star_tick` (16 whole frames summed per camera) and `rig_tick` ran on the draw thread once a second, so 2 or 3 displayed frames were lost at every tick. They now run on `nav_main`, which carries the same work (median 33 ms, max 38, period 1.00 s), and the window reads a snapshot published under the mutex. `draw_trail` read the geometry unlocked, safe only while one thread did everything; it now reads the snapshot. Card programs unchanged by hash.
+
+**The cameras and the card were not stalling:** over 148,921 maps (2.8 h), no stall of 133 ms or more on L or R; 3 maps got no L frame and 0 no R frame. No USB events in the kernel log in 60 minutes. Tracking on the card never went through the draw thread, so whether tracking itself improves is not measured.

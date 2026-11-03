@@ -51,7 +51,7 @@ Each camera is one tracker on the card, sharing the team, frames interleaved in 
 
 ## Navigation by fixed lights (user's direction, 2026-11-03)
 
-The room's LEDs are treated as a star tracker treats stars. `src/host/stars.{h,c}`, on the desktop host, a fix per camera per second from a 16-frame mean.
+The room's LEDs are treated as a star tracker treats stars. `src/host/stars.{h,c}`, on the desktop host, a fix per camera per second from a 16-frame mean, on its own thread (`nav_main`): on the draw thread it froze the window for 33 to 40 ms every second.
 
 | Orbital or GPS method | Here |
 | --- | --- |
@@ -119,7 +119,7 @@ LK flow is what the card measures best, and motion, unlike appearance, does not 
 
 The choice over the design first written here, averaging the cost volume: three small planes against 15 MB at 15 Hz, it uses all of L's and R's 30 frames a second, it removes noise before the difference where it biases, and it reproduces the very exposures the 17.82 % came from.
 
-**Written, waiting for motion:** each map's CSV line has where each camera saw change, in its own pixels. A small thing moving is one place in each view at one moment: a test of the geometry, and later more correspondences for it, with no appearance to match. Nothing has been measured with it yet: the first run with movement began about 05:10 on 2026-11-03 and is not analysed. **Not built:** adjusting the geometry from those correspondences.
+**Written, waiting for motion:** each map's CSV line has where each camera saw change, in its own pixels. A small thing moving is one place in each view at one moment: a test of the geometry, and later more correspondences for it, with no appearance to match. Nothing has been measured with it yet: the first movement came with cameras being knocked on 2026-11-03 (from 04:59:36), when the geometry was stale, so that run cannot test it. **Not built:** adjusting the geometry from those correspondences.
 
 ## Design influences
 
