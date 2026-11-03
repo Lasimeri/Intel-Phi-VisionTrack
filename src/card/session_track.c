@@ -352,11 +352,23 @@ int session_track(struct vt_ctl *ctl, struct vt_dma *dma, const struct topo *top
     printf("vtrackd: track session: %ux%u %s, %s, track team %d threads, pyramid team %d, %d x %d, ingest on cpu %d, arena %zu MiB (card)\n", cfg->width, cfg->height, cfg->stereo ? "stereo" : "mono", two ? "2 pipelines" : "1 pipeline", n, pn, cores, tpc, svc, a.bytes >> 20);
     ctl->card_session = seq;
 
-    uint64_t nres = 0, last_dma = 0;
+    uint64_t nres = 0, last_dma = 0, map_dma = 0;
     uint64_t idle_since = vt_tsc();
     const double hz = 1.238e9; /* the watchdog needs no precision */
     int rc = 0;
     unsigned spin = 0;
+    /* Tracking comes first. Each result leaves as soon as it exists, and the still pictures' flow and the map are done only while no frame is waiting, on each camera's newest frame: a job not reached is replaced
+     * by the next, and that frame's pyramid is not written again until the job after it has replaced it. If the card falls behind it is the flow that slows, not the tracker or what the window shows. */
+    struct {
+        struct tracker *t;
+        int set, wanted;
+        struct vt_msg msg;
+    } flow_job[VT_MAX_CAMERAS];
+    memset(flow_job, 0, sizeof flow_job);
+    struct vt_msg map_msg;
+    memset(&map_msg, 0, sizeof map_msg);
+    int map_wanted = 0;
+    uint64_t depth_cycles = 0;
     for (;;) {
         if (g.failed) {
             rc = -1;
@@ -365,6 +377,41 @@ int session_track(struct vt_ctl *ctl, struct vt_dma *dma, const struct topo *top
         if (!two && !cfg->dual)
             build_one(&f);
         if ((cfg->dual ? __atomic_load_n(&g.landed, __ATOMIC_ACQUIRE) : __atomic_load_n(&f.built, __ATOMIC_ACQUIRE)) <= nres) {
+            /* No frame waiting: one piece of what is below tracking, then look again. */
+            if (ld) {
+                int k = 0;
+                while (k < VT_MAX_CAMERAS && !flow_job[k].wanted)
+                    k++;
+                if (k < VT_MAX_CAMERAS || map_wanted) {
+                    const uint64_t t3 = vt_tsc();
+                    if (k < VT_MAX_CAMERAS) {
+                        flow_job[k].wanted = 0;
+                        ld_frame(ld, k, tk_level(flow_job[k].t, flow_job[k].set, ld_flow_level(ld)));
+                        if (k == 2) {
+                            map_msg = flow_job[k].msg;
+                            map_wanted = 1;
+                        }
+                    } else {
+                        map_wanted = 0;
+                        /* The map's own buffers: the last one's copy must have finished. */
+                        if (map_dma && vt_dma_wait(dma, map_dma, 5.0)) {
+                            fprintf(stderr, "vtrackd: depth map DMA timed out\n");
+                            rc = -1;
+                            break;
+                        }
+                        const uint64_t sent = ld_map(ld, &map_msg, depth_pub_addr);
+                        if (sent == UINT64_MAX) {
+                            fprintf(stderr, "vtrackd: depth map copy refused\n");
+                            rc = -1;
+                            break;
+                        }
+                        if (sent)
+                            map_dma = sent;
+                    }
+                    depth_cycles += vt_tsc() - t3;
+                    continue;
+                }
+            }
             /* One uncached read every few thousand polls: the session word is rare, the local counter is not. */
             if ((++spin & 0xfff) == 0) {
                 if (ctl->session_end || ctl->quit)
@@ -412,16 +459,13 @@ int session_track(struct vt_ctl *ctl, struct vt_dma *dma, const struct topo *top
             if (cam < 2)
                 fuse_frame(&fu, cam, res);
             res->cycles[VT_T_EST] = vt_tsc() - t2;
-            /* The map goes before the result on the same channel, so the wait for the result above also covers the map's buffers. */
             if (ld) {
-                const uint64_t t3 = vt_tsc();
-                ld_frame(ld, cam, tk_level(cur, set, ld_flow_level(ld)));
-                if (cam == 2 && ld_map(ld, m, depth_pub_addr) == UINT64_MAX) {
-                    fprintf(stderr, "vtrackd: depth map copy refused\n");
-                    rc = -1;
-                    break;
-                }
-                res->cycles[VT_T_DEPTH] = vt_tsc() - t3;
+                flow_job[cam].t = cur;
+                flow_job[cam].set = set;
+                flow_job[cam].msg = *m;
+                flow_job[cam].wanted = 1;
+                res->cycles[VT_T_DEPTH] = depth_cycles; /* since the last result */
+                depth_cycles = 0;
             }
             nres++;
             res->seq = nres;
@@ -467,6 +511,8 @@ int session_track(struct vt_ctl *ctl, struct vt_dma *dma, const struct topo *top
     }
     if (last_dma)
         vt_dma_wait(dma, last_dma, 5.0);
+    if (map_dma)
+        vt_dma_wait(dma, map_dma, 5.0);
     team_destroy(tm);
     arena_close(&a);
     printf("vtrackd: track session: %llu results (card)\n", (unsigned long long)nres);

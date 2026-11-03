@@ -448,7 +448,18 @@ The user's direction: double it until the frame rate drops. Flow is the still pi
 | **Level 0, native** | **16,200 / 7,200** | **75 s** | **30.2, 30.2, 15.1** | **29.6, 29.8, 15.0** | **15.1** | **4,515** | **5,825** | **47.5, 51.4** | **0** |
 | Native, cells half as tall | 32,400 / 14,400 | 38 s | **16.8, 25.7, 7.3** | 12.8, 20.2, 4.2 | **7.3** | 8,285 | 11,101 | **371.9, 382.3** | **1,651** |
 
-The rates over 25 s read a little high: wall time in that log is whole seconds. **Native holds and the next doubling collapses,** so native is the default. Level 0 is about 873 ms of the session's thread a second (arithmetic: 30 x 10.3 x 2, and 15 x (5.3 + 10.5) for D and its map).
+The rates over 25 s read a little high: wall time in that log is whole seconds. **Native holds its rate and the next doubling collapses.** Level 0 is about 873 ms of the session's thread a second, level 1 about 367 (arithmetic: 30 x 10.3 x 2, and 15 x (5.3 + 10.5) for D and its map; 30 x 3.1 x 2, and 15 x (1.6 + 10.5)).
+
+**The user then halved it, native being laggy to use: level 1 is the default.** Measured, 55 s: worst 5 s windows 29.8, 29.8, 15.0, maps 15.0, 0 dropped.
+
+**Then tracking was put first,** the user's direction. Each result used to leave after that frame's flow and map, and the window shows a frame only when its result returns, so that work delayed the picture. Now the result leaves at once, and flow and the map run only while no frame is waiting, on each camera's newest frame. One panel reading each:
+
+| Flow | Frames/s L, R, D, worst 5 s | Capture to result, median, p95 ms, before | After |
+| --- | --- | --- | --- |
+| Level 1 | 29.8, 29.8, 15.0 | 36.0, 37.8 | **33.9, 34.6** |
+| Native | 29.8, 29.8, 15.0 | 47.5, 51.4 | **36.7, 44.3** |
+
+A frame that lands during a job still waits for that job, up to about 10.5 ms behind a map. **That flow gives way under overload rather than the tracker is by design and has not been seen:** neither row is overloaded. On screen, the flow vectors were drawn over the tracker's marks; they now go under them, and are not drawn at all while a target is being dragged.
 
 **That ceiling may be this code rather than the card.** "Mean" nearly doubled when the cells doubled with the same pixels, so about 5.3 of its 5.8 ms scale with cells and 0.5 with pixels (arithmetic). That points at `still_decide`, which runs on one thread. It has not been timed apart, or moved onto the team.
 

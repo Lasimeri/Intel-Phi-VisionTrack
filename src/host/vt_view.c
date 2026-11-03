@@ -1138,8 +1138,8 @@ int main(int argc, char **argv)
     A.view_level = -1;
     A.depth_avg = 128;
     A.depth_planes = 64;
-    /* Native: the finest that holds on one card (2026-11-03, measured). 30, 30 and 15 frames a second, 0 dropped; doubling the cells again gave 17, 26 and 7. docs/measurements.md. */
-    A.flow_level = 0;
+    /* Half of native: the user's choice, 2026-11-03, native being laggy to use though it holds its frame rate (capture to result 47.5 ms, here 35.4). docs/measurements.md. */
+    A.flow_level = 1;
     int at_x = -1, at_y = -1;
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--dev") && i + 1 < argc) a->dev = argv[++i];
@@ -1370,9 +1370,10 @@ int main(int argc, char **argv)
                 x11view_gray(&v, K->ring + (show % RING) * (uint64_t)K->w * (uint64_t)K->h, K->w, K->h, K->w, ox, oy, 1);
             else
                 x11view_fill(&v, ox, oy, K->w, K->h, 0x101010u);
-            draw_view(&v, ox, oy, K, &r[k], tracking);
-            if (tracking && map)
+            /* Under the tracker's own marks, and out of the way altogether while a target is being picked. */
+            if (tracking && map && !dragging)
                 dv_vectors(&v, map, k, ox, oy, K->w, A.mirror, vectors_all);
+            draw_view(&v, ox, oy, K, &r[k], tracking);
             text_outlined(&v, ox + 8, oy + K->h - 22, 2, cap ? WHITE : GREY, K->name);
             if (!cap)
                 text_outlined(&v, ox + 8, oy + 8, 2, WHITE, K->state ? "no frames" : "waiting for the device");
