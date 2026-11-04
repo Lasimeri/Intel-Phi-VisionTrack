@@ -877,10 +877,56 @@ Orange frames 14.99, 15.00 and 15.02 a second. Capture to result median 31.06, p
 
 **D does not hold 30 when much moves in its own picture.** 197 gaps over 100 ms among 162,040 real frames, the largest 136.0 ms: one real frame missing, each time. By the table about 187 of them lie in the last two rows (arithmetic). L and R moving does not do it: with theirs at 800 or more together and D's under 100, 20 s, D read 29.95, lowest 29, 15.05 real. Which stage runs long under D's motion is not separated. The count is one frame's, once a second, so the bins are rough.
 
-**D's reference: no false move, and one real move missed.** 0 moves in 163,467 frames, 142 s of them at 300 or more of D's own cells; two or more windows on 99.64 %; 584 microseconds at the median, p95 642. The largest reading, 8.64, -3.94 px with 581 lines moving, was not believed, and half of all that had long been still moved on only 2 frames.
+**D's reference: no false move.** 0 moves in 163,467 frames, 142 s of them at 300 or more of D's own cells; two or more windows on 99.64 %; 584 microseconds at the median, p95 642. The largest reading, 8.64, -3.94 px with 581 lines moving, was not believed, and half of all that had long been still moved on only 2 frames.
 
-**D moved at 23:26:21, by every other witness, and its reference did not say so.** L read 1,296 cells, R 786, D 786. L and R's turn kernels stayed at correlation 0.98 and 0.997. D's fell from 0.999 to 0.018 and stayed there: `camera D cannot find itself`. D's lights, read fresh with no memory, went from -0.76, 2.79 px to 0.04, 16.61 over 242 fixes, 13.8 px, and stayed. Over the 299 frames around it the reference read at most 2.06 px, half of all still reached 144 per mille at most, 162 frames were unsure and 120 had under two windows: no move, and the head was not shifted. All 3,645 frames since read unsure, none still: it stopped vouching, but it never called the move. Why the turn kernel cannot find a 14 px shift, inside what it searches, is not separated. There is no truth for how far D went.
+**D did not move at 23:26:21. A first reading here, pushed in `4a51d12`, said it had, and the operator said it had not.** What looked like a move: L read 1,296 cells, R 786, D 786; D's turn kernel fell from correlation 0.999 to 0.018 and stayed there, `camera D cannot find itself`; its lights check went from -0.76, 2.79 px to 0.04, 16.61. What it was, from a fresh 150-frame exposure at 00:13, read light by light:
 
-**R turned at 21:06:48, the turn kernel's first real one.** Tilt +0.068, pan -0.455, roll -0.010 degrees at correlation 0.634, then +0.025, -0.436, -0.008 at 0.892 by 21:06:53; the geometry carried and kept on file. R's whole grid, 4,080 cells, read moving within about 3 s of it (the two clocks lined up by their first rows). L and D read no turn. R's lights went from 4.61, 2.76 to 4.23, 12.48 over 5,061 fixes and stayed. **So something moved and stayed, and the two witnesses disagree on what:** 0.436 degrees at fb 1095.8 is 8.3 px across (arithmetic), where the lights moved 9.7 px down and 0.4 across. Not resolved. An earlier 4,080 at 20:52:12 had no turn read, and R's lights moved 1.81 px across, under the 0.1 degree the kernel leaves alone (1.9 px, arithmetic); whether that was the same kind of event is not known.
+| Catalogued light of D | 06:11 exposure | 06:35 exposure | 00:13 exposure |
+| --- | --- | --- | --- |
+| 752.0, 189.4 | +1.9, -0.5 | +0.1, -0.1 | **-1.2, +2.6**, contrast 64,946 |
+| 353.6, 223.7 | +1.8, -0.1, contrast 40,878 | +1.7, -0.1, contrast 41,730 | **gone**: strongest within 40 px 1,775 |
+
+The first lies within 0.2 px of where the check had read it for hours before (-1.14, +2.79). The second went dark, and nothing bright lies where the fix of 16.61 put the lights. So the check had locked onto nothing. **The whole event is a change in what D sees:** its textured pixels went from about 14,700 to 28,600 between about 23:17 and 23:26, and back to 13,700; over those minutes its kernel took new references, from 2 keys to 20, the last at correlation 0.999, as it is built to when the light leaves a reference behind. When the view changed back, correlation against that last key fell below `ATT_KEY_FLOOR`, which forbids taking another, so it stays lost until a new session. D's reference read unsure on every frame since and called no move, which was right.
+
+**R's carried turns are unverified.** The kernel read tilt +0.025, pan -0.436, roll -0.008 degrees at correlation 0.892 at 21:06:48, within about 3 s of R's whole grid of 4,080 cells reading moving, and -0.032, -1.570, -0.076 at 0.922 at 23:42. Both went into the geometry on file. R's lights moved too, but after D the lights prove nothing. Against the exposure of 06:35, `vt_attitude` offline reads L +4.64 and R -4.81 degrees at correlations of 0.285 and 0.185, where 06:11 against 06:35 reads 0 on all three.
 
 L and R's references: 14 chosen, 5 on L and 9 on R. The log does not say why each was replaced.
+
+## FSR first, L and R at 60, all flow on the second team (the operator's orders, 2026-11-04 00:10 to 01:15; `logs/live/rates-20261104-011556.csv`, shown csv, the card's log; hosts `out/host/vt_replay`)
+
+The order: 720p15, FSR, 1080p30 by flow; no 1440p, no Lanczos; flow on the 118 threads FSR uses; L and R doubled again; everything else on the first 118. Card = host IDENTICAL on `hold`, `bigbox`, `dart` at 640x480, 60 frames, and `bigbox` 1280x720 to 1920x1080, 12 frames; `vt_vd` identical; audit 0 illegal, 0 suspect, 3,075 KNC vector. Every scene without FSR the same to the bit: 27 of 27 at 60 frames, `--framegen`.
+
+Against the clean truth, host, 640x480 to 960x720, RCAS 0.4 stops, 80 frames:
+
+| Scene | Real, 2x + Lanczos | Straight | Generated, read-only pass | Between finished pictures | On the thing, before | After |
+| --- | --- | --- | --- | --- | --- | --- |
+| hold | 48.84 | 47.41 | 48.76 | 47.41 | 45.85 | 45.05 |
+| bigbox | 42.49 | 41.95 | 41.49 | 42.36 | 33.18 | 35.01 |
+| dart | 41.08 | 40.49 | 37.78 | 38.55 | 23.14 | 24.78 |
+
+Alone on the card, real size, 11 frames: FSR 16.14 ms a frame, accumulate 10.94, the picture half way 1.04, the search and its filters on the raw frames 2.29. The chain before: 28.37 and 6.51.
+
+**The first build broke D.** The operator saw it at once: "Optical flow works on cam L & R, and broke on cam D". D 15.83 pictures a second, 170 of 1,093 generated, against L and R 59.4. Measured under motion: L 8.65 ms, R 6.88 at 30 a second each; D's flow, FSR and picture 3.09, 33.65 and 2.05 at 15, of which `refine` 9.85: 105 % of the team (arithmetic). FSR let 210 of 1,866 go, and the tracker waited for the flow 209 times. What it took:
+
+| Change | Before | After |
+| --- | --- | --- |
+| FSR's work per moving block, x87 on one thread, onto the team, the same to the bit on 5 of 5 scenes | `refine` 9.85 ms | clear 0.40, refine 0.19, finish 0.04, mark 0.31: 0.93 ms |
+| FSR frame live | 33.65 ms | 25.34 ms |
+| D first on the team, at most two other jobs inside its frame | 210 of 1,866 let go | 0 of 1,589 |
+| A fourth pyramid set | the tracker waited 209 times | 0 |
+| The window takes pictures one at a time | a late pair showed only the newer | both |
+
+The session after, from 01:16, 73 s:
+
+| D's own cells moving | Seconds | D shown a second | Of them generated |
+| --- | --- | --- | --- |
+| under 100, with the start | 18 | 28.94 | 14.44 |
+| 100 to 299 | 21 | 30.10 | 15.05 |
+| 300 to 599 | 26 | 30.04 | 15.04 |
+| 600 or more | 9 | 30.00 | 15.00 |
+
+L 59.477, R 59.546, D 30.045 pictures a second; largest gaps 58.9, 50.0, 50.5 ms; capture to screen 77.0, 81.8, 83.0 ms on L, 77.3, 84.2, 85.3 on R, 158.4, 165.1, 167.0 on D; capture to result about 36 ms; maps 15.01; orange D 15.02, L 14.98, R 15.01. **Only 9 s at the top of the motion: this is the first such reading and not yet a long one.** The team is at about 91 % of its time (arithmetic): L 8.54 ms, R 6.72 at 30 a second each, D's 2.91, 25.34 and 1.95 at 15.
+
+D's capture to screen rose, from 135.6 ms: the picture half way now waits for the newer frame's FSR. **The chain gained throughput, not latency.**
+
+The same session over 259 running seconds, the seconds the card was lent to the gates left out: L 59.78, R 59.82, D 29.98 pictures a second. D by its own count: under 100, 82 s, 30.05; 100 to 299, 97 s, 29.87; 300 to 599, 68 s, 30.04, lowest second 30; 600 or more, 12 s, 30.00, lowest second 30. Its count reached 742 of 1,800 at most.

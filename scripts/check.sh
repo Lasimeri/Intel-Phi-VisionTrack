@@ -92,12 +92,11 @@ out/host/autoref_check >"$s/ar" 2>&1 && pass "static references: every check" ||
 out/host/vd_ref >"$s/vdh" 2>&1 && pass "orange vectors: every check on the host" || { fail "orange vectors on the host"; /usr/bin/grep -a FAIL "$s/vdh" | head -4; }
 scripts/card_run.sh -p 256 vt_vd >"$s/vdc" 2>&1 && pass "orange vectors: every check on the card" || { fail "orange vectors on the card"; /usr/bin/grep -a FAIL "$s/vdc" | head -4; }
 if [[ "$(/usr/bin/grep -a down_hash "$s/vdh")" == "$(/usr/bin/grep -a down_hash "$s/vdc")" && -n "$(/usr/bin/grep -a down_hash "$s/vdc")" ]]; then pass "orange vectors: card = host, bit for bit"; else fail "orange vectors: card and host differ"; fi
-# FSR on camera D's path: 720p class up, flow between the pictures, Lanczos down. Card = host on every picture. What it looks like is the operator's to judge; this only catches a broken chain: on a noisy still thing it must take noise out.
-# FSR on camera D's path: 720p class up, flow between the pictures, Lanczos down. Card = host on every picture. What it looks like is the operator's to judge; this only catches a broken chain: on a noisy still thing it must take noise out.
+# FSR on camera D's path: real frames straight up, then the frame between the finished pictures. Card = host on every picture. What it looks like is the operator's to judge; this only catches a broken chain: on a noisy still thing it must take noise out.
 for n in hold bigbox; do
-    if scripts/scene.sh "$n" 640x480 --frames 60 --fsr 960x720 --fsr-up 1280x960 --fsr-sharp 0.4 >"$s/scene" 2>&1; then pass "$n through FSR, up, flow, Lanczos down: replay identical"; else fail "$n through FSR"; /usr/bin/grep -aE 'replay|refused|no room' "$s/scene" | head -4; fi
+    if scripts/scene.sh "$n" 640x480 --frames 60 --fsr 960x720 --fsr-sharp 0.4 >"$s/scene" 2>&1; then pass "$n through FSR, then the frame between its pictures: replay identical"; else fail "$n through FSR"; /usr/bin/grep -aE 'replay|refused|no room' "$s/scene" | head -4; fi
 done
-out/host/vt_replay hold 640x480 --frames 80 --fsr 960x720 --fsr-up 1280x960 --fsr-sharp 0.4 >/dev/null 2>"$s/fq" || true
+out/host/vt_replay hold 640x480 --frames 80 --fsr 960x720 --fsr-sharp 0.4 >/dev/null 2>"$s/fq" || true
 gain=$(/usr/bin/grep -a fsrcheck "$s/fq" | sed -E 's/.*whole FSR ([0-9.]+) Lanczos ([0-9.]+).*/\1 \2/' | awk '{print $1 - $2}')
 if awk -v g="${gain:-0}" 'BEGIN{exit !(g >= 6)}'; then pass "FSR takes noise out of a still scene: ${gain} dB over a plain Lanczos against the clean truth"; else fail "FSR noise reduction ${gain:-none} dB, under 6"; fi
 # A generated picture is for the eye: a real row is the same to the bit with generation on or off, on the host's lane model, which the scenes above prove equal to the card.

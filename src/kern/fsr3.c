@@ -69,6 +69,21 @@ struct down_row {
     float w[DOWN_TAPS];
 };
 
+/* The frame between two pictures: what a block's window weighs each of 16 columns by, and how far apart each block's vector puts the two pictures. */
+struct mid_col {
+    float w[3][16] VX_ALIGNED;
+    int b0;
+};
+
+struct mid_row {
+    float w[2];
+    int b0;
+};
+
+struct mid_off {
+    int16_t ax, ay, bx, by;
+};
+
 struct block {
     float mx, my;        /* the vector, render pixels: a thing here was at +(mx, my) in the last frame */
     float v4k;           /* get4KVelocity */
@@ -82,7 +97,6 @@ struct fsr {
     int rw, rh, uw, uh, dw, dh, bw, bh, frame, scene_changed;
     struct vt_plane hc, hb, hm, hl, hh; /* every source row filtered sideways once: the Lanczos, the box's centre and moment, the middle two's min and max. An output row only mixes four of them. */
     int *mlist, *slist, nmoving, nstamped; /* the blocks that are not plain still ones: the rest need no touching */
-    long double mv_scale;
     long double history_steps; /* how many of those steps back the history really is: more than one when frames were let go */
     struct down_col *down_cols;
     struct down_row *down_rows;
@@ -100,7 +114,11 @@ struct fsr {
     uint8_t *stamp;
     int stamp_stride;
     /* Upscale resolution. */
-    struct vt_plane color[2], lock[2], newlock, out2[2];
+    struct vt_plane color[2], lock[2], newlock, out2[2], mid;
+    const struct fg_field *mid_field;
+    struct mid_col *mid_cols;
+    struct mid_row *mid_rows;
+    struct mid_off *mid_off;
     int turn; /* which of each pair is this frame's */
     struct block *blocks;
     struct up_col *cols;
@@ -168,13 +186,13 @@ static size_t table_bytes(int rw, int rh, int uw, int uh)
 {
     const size_t bw = (size_t)(rw + BLOCK - 1) / BLOCK, bh = (size_t)(rh + BLOCK - 1) / BLOCK;
     const size_t ug = (size_t)(uw + 15) / 16, hg = (size_t)((rw + 1) / 2 + 15) / 16, rg = (size_t)(rw + 15) / 16;
-    return bw * bh * sizeof(struct block) + ug * sizeof(struct up_col) + (size_t)uh * sizeof(struct up_row) + (ug + 2 * hg + rg) * sizeof(struct lane_map) + ((size_t)(rh + uh) + (size_t)rh) * sizeof(struct row_map) * 2 + (size_t)(rw + rh) * 8u + bw * bh * 2u * sizeof(int) + (size_t)((rw + 31) & ~15) * (size_t)(rh + 2) + bw * bh * 2u * sizeof(int) + (bw + bh) * sizeof(int) + 16384u;
+    return ug * sizeof(struct mid_col) + (size_t)uh * sizeof(struct mid_row) + bw * bh * sizeof(struct mid_off) + 256u + bw * bh * sizeof(struct block) + ug * sizeof(struct up_col) + (size_t)uh * sizeof(struct up_row) + (ug + 2 * hg + rg) * sizeof(struct lane_map) + ((size_t)(rh + uh) + (size_t)rh) * sizeof(struct row_map) * 2 + (size_t)(rw + rh) * 8u + bw * bh * 2u * sizeof(int) + (size_t)((rw + 31) & ~15) * (size_t)(rh + 2) + bw * bh * 2u * sizeof(int) + (bw + bh) * sizeof(int) + 16384u;
 }
 
 size_t fsr_bytes(int rw, int rh, int uw, int uh, int dw, int dh)
 {
     const int hw = (rw + 1) / 2, hh = (rh + 1) / 2, qw = (hw + 1) / 2, qh = (hh + 1) / 2, ew = (qw + 1) / 2, eh = (qh + 1) / 2;
-    return (sizeof(struct fsr) + 4096u) + (size_t)(2 + 2 + 2 + 3 + 1 + 8) * pl_bytes(rw, rh) + 3u * pl_bytes(hw, hh) + 2u * pl_bytes(qw, qh) + 2u * pl_bytes(ew, eh) + 8u * pl_bytes(uw, uh) + 5u * pl_bytes(uw, rh) + table_bytes(rw, rh, uw, uh) + (dw ? ((size_t)(dw + 15) / 16) * sizeof(struct down_col) + (size_t)dh * sizeof(struct down_row) + 256u * (size_t)(uw + 79) * sizeof(float) + 4096u : 0u);
+    return (sizeof(struct fsr) + 4096u) + (size_t)(2 + 2 + 2 + 3 + 1 + 8) * pl_bytes(rw, rh) + 3u * pl_bytes(hw, hh) + 2u * pl_bytes(qw, qh) + 2u * pl_bytes(ew, eh) + 9u * pl_bytes(uw, uh) + 5u * pl_bytes(uw, rh) + table_bytes(rw, rh, uw, uh) + (dw ? ((size_t)(dw + 15) / 16) * sizeof(struct down_col) + (size_t)dh * sizeof(struct down_row) + 256u * (size_t)(uw + 79) * sizeof(float) + 4096u : 0u);
 }
 
 static inline long double sat_l(long double x);
@@ -239,7 +257,6 @@ struct fsr *fsr_init(void *mem, int rw, int rh, int uw, int uh, int dw, int dh, 
     f->scale_y = R(uh) / R(rh);
     f->dw = dw;
     f->dh = dh;
-    f->mv_scale = 1.0L;
     f->lock_decay = (float)(0.1L / JITTER_LENGTH);
     /* FsrRcasCon: stops to linear. */
     f->rcas_con = (float)exp_series(-sharpness * 0.693147180559945309417232121458176568L);
@@ -276,6 +293,7 @@ struct fsr *fsr_init(void *mem, int rw, int rh, int uw, int uh, int dw, int dh, 
     f->newlock = new_plane(&m, uw, uh);
     f->out2[0] = new_plane(&m, uw, uh);
     f->out2[1] = new_plane(&m, uw, uh);
+    f->mid = new_plane(&m, uw, uh);
 
     const int ug = (uw + 15) / 16, hg = (hw + 15) / 16, rg = (rw + 15) / 16;
     f->blocks = take(&m, (size_t)f->bw * (size_t)f->bh * sizeof(struct block));
@@ -420,6 +438,30 @@ struct fsr *fsr_init(void *mem, int rw, int rh, int uw, int uh, int dw, int dh, 
                 r->w[t] = (float)(R(r->w[t]) / total);
         }
     }
+    /* The windows of the frame between two pictures, over the render size's blocks, at the upscaled size. */
+    f->mid_cols = take(&m, (size_t)ug * sizeof(struct mid_col));
+    f->mid_rows = take(&m, (size_t)uh * sizeof(struct mid_row));
+    f->mid_off = take(&m, (size_t)f->bw * (size_t)f->bh * sizeof(struct mid_off));
+    {
+        const long double bx_size = R(BLOCK) * R(uw) / R(rw), by_size = R(BLOCK) * R(uh) / R(rh);
+        for (int g = 0; g < ug; g++) {
+            struct mid_col *c = &f->mid_cols[g];
+            const int b0 = (int)floorl((R(g * 16) + 0.5L) / bx_size - 0.5L);
+            c->b0 = b0;
+            for (int k = 0; k < 16; k++) {
+                const long double u = (R(g * 16 + k) + 0.5L) / bx_size - 0.5L, fl = floorl(u), t = u - fl;
+                const int at = (int)fl - b0;
+                for (int i = 0; i < 3; i++)
+                    c->w[i][k] = i == at ? (float)(1.0L - t) : i == at + 1 ? (float)t : 0.0f;
+            }
+        }
+        for (int y = 0; y < uh; y++) {
+            const long double u = (R(y) + 0.5L) / by_size - 0.5L, fl = floorl(u), t = u - fl;
+            f->mid_rows[y].b0 = (int)fl;
+            f->mid_rows[y].w[0] = (float)(1.0L - t);
+            f->mid_rows[y].w[1] = (float)t;
+        }
+    }
     /* Lanczos2 of the history sampler, at each 64th of a pixel: the four weights over their sum. */
     for (int k = 0; k < FRAC_STEPS; k++) {
         const long double t = R(k) / R(FRAC_STEPS);
@@ -468,34 +510,33 @@ static void block_offsets(struct fsr *f, struct block *b)
     b->v4k = (float)sqrtl(vx4 * vx4 + vy4 * vy4);
 }
 
-static void clear_marks(struct fsr *f)
+/* Last frame's marks and blocks, on the team. Regions overlap, but every write to one is the same value. */
+static void clear_part(struct fsr *f, int tid, int n)
 {
-    for (int i = 0; i < f->nstamps; i++)
+    for (int i = row_of(f->nstamps, tid, n); i < row_of(f->nstamps, tid + 1, n); i++)
         for (int r = 0; r < BLOCK; r++)
             memset(f->stamp + (size_t)(f->stamp_y[i] + r) * (size_t)f->stamp_stride + (size_t)f->stamp_x[i], 0, BLOCK);
-    f->nstamps = 0;
-}
-
-static void clear_blocks(struct fsr *f)
-{
-    for (int i = 0; i < f->nmoving; i++)
+    for (int i = row_of(f->nmoving, tid, n); i < row_of(f->nmoving, tid + 1, n); i++)
         still_block(&f->blocks[f->mlist[i]]);
-    for (int i = 0; i < f->nstamped; i++)
+    for (int i = row_of(f->nstamped, tid, n); i < row_of(f->nstamped, tid + 1, n); i++)
         f->blocks[f->slist[i]].stamped = 0;
-    f->nmoving = f->nstamped = 0;
 }
 
-void fsr_begin(struct fsr *f, const struct vt_plane *cur, const struct vt_plane *prev, const struct fg_field *field, long double mv_scale, long double history_steps, int scene_changed)
+void fsr_begin(struct fsr *f, const struct vt_plane *cur, const struct vt_plane *prev, const struct fg_field *field, long double history_steps, int scene_changed)
 {
     f->cur_q6 = *cur;
     f->prev_q6 = *prev;
     f->field = field;
-    f->mv_scale = mv_scale;
     f->history_steps = history_steps;
     f->scene_changed = scene_changed;
-    clear_marks(f);
-    clear_blocks(f);
-    if (scene_changed)
+}
+
+/* This frame's moving blocks, once the last frame's are cleared. */
+static void list_moving(struct fsr *f)
+{
+    const struct fg_field *field = f->field;
+    f->nstamps = f->nmoving = f->nstamped = 0;
+    if (f->scene_changed)
         return;
     for (int by = 0; by < f->bh; by++) {
         const struct fg_vec *row = &field->v[clampi(by, 0, field->h - 1) * field->w];
@@ -506,9 +547,9 @@ void fsr_begin(struct fsr *f, const struct vt_plane *cur, const struct vt_plane 
             const int me = by * f->bw + bx;
             struct block *b = &f->blocks[me];
             b->moving = 1;
-            /* Half resolution in the field, so twice that here, scaled by how much of a real frame's step this frame covers. FSR_REFINE takes it below a pixel. */
-            b->mx = (float)(R(2 * v->x) * mv_scale);
-            b->my = (float)(R(2 * v->y) * mv_scale);
+            /* Half resolution in the field, so twice that here. FSR_REFINE takes it below a pixel. */
+            b->mx = (float)R(2 * v->x);
+            b->my = (float)R(2 * v->y);
             f->mlist[f->nmoving++] = me;
         }
     }
@@ -550,11 +591,11 @@ static void refine_block(struct fsr *f, int i)
     b->my = (float)(R(b->my) + uy);
 }
 
-static void finish_blocks(struct fsr *f)
+/* Everything else a moving block knows, from its final vector. x87 for each, so on the team: on one thread, 2026-11-04, this and the clearing read 9.85 ms a frame live. */
+static void finish_part(struct fsr *f, int tid, int n)
 {
     /* The vector so far is a step between the two frames given. The history may lie further back: frames let go in between, moving on as these do. */
-    /* Everything else a moving block knows, from its final vector. x87 on one thread, so never over the still ones: 8,160 of them at 1080p. */
-    for (int i = 0; i < f->nmoving; i++) {
+    for (int i = row_of(f->nmoving, tid, n); i < row_of(f->nmoving, tid + 1, n); i++) {
         struct block *b = &f->blocks[f->mlist[i]];
         b->mx = (float)(R(b->mx) * f->history_steps);
         b->my = (float)(R(b->my) * f->history_steps);
@@ -564,7 +605,12 @@ static void finish_blocks(struct fsr *f)
         b->vel_inst = (float)(1.0L - sat_l(R(b->v4k) / 20.0L));
         b->dist = (float)sat_l(0.75L - NEAR_M / 20.0L);
     }
-    for (int i = 0; i < f->nmoving; i++) {
+}
+
+/* What needs every moving block's vector first. Each block writes only its own results and its own place in the lists; a mark may overlap another's, and is the same value. */
+static void mark_part(struct fsr *f, int tid, int n)
+{
+    for (int i = row_of(f->nmoving, tid, n); i < row_of(f->nmoving, tid + 1, n); i++) {
         const int me = f->mlist[i], bx = me % f->bw, by = me / f->bw;
         struct block *b = &f->blocks[me];
         /* ComputeMotionDivergence: at the block this one came from. */
@@ -580,16 +626,22 @@ static void finish_blocks(struct fsr *f)
         const int sx = clampi(bx * BLOCK + b->ix, 0, f->stamp_stride - BLOCK), sy = clampi(by * BLOCK + b->iy, 0, f->rh + 2 - BLOCK);
         for (int r = 0; r < BLOCK; r++)
             memset(f->stamp + (size_t)(sy + r) * (size_t)f->stamp_stride + (size_t)sx, 255, BLOCK);
-        f->stamp_x[f->nstamps] = sx;
-        f->stamp_y[f->nstamps] = sy;
-        f->nstamps++;
+        f->stamp_x[i] = sx;
+        f->stamp_y[i] = sy;
         for (int oy = sy / BLOCK; oy <= (sy + BLOCK - 1) / BLOCK && oy < f->bh; oy++)
             for (int ox = sx / BLOCK; ox <= (sx + BLOCK - 1) / BLOCK && ox < f->bw; ox++)
-                    if (!f->blocks[oy * f->bw + ox].stamped) {
-                        f->blocks[oy * f->bw + ox].stamped = 1;
-                        f->slist[f->nstamped++] = oy * f->bw + ox;
-                    }
+                f->blocks[oy * f->bw + ox].stamped = 1;
     }
+}
+
+/* Which blocks were marked, for clearing them next frame. */
+static void list_marked(struct fsr *f)
+{
+    f->nstamps = f->nmoving;
+    f->nstamped = 0;
+    for (int i = 0; i < f->bw * f->bh; i++)
+        if (f->blocks[i].stamped)
+            f->slist[f->nstamped++] = i;
 }
 
 /* ---- samplers of a plane under a block's vector, and of one plane on another's grid ---- */
@@ -1140,78 +1192,6 @@ static void stage_acc(struct fsr *f, int tid, int n)
 
 /* ---- FSR_SHARPEN: FsrRcasF with FSR_RCAS_DENOISE, one channel: the luma of grey is twice grey, and only its ratios are read ---- */
 
-/* A generated frame, through FSR without touching its history: the operator wants the flow first and every frame upscaled, and there are 33 ms for each. What has not moved is the history as it stands, denoised, and costs a read. What has moved is the history brought over by half a step, held to what this frame shows there. Its result is scratch: this turn's planes, which the next real frame writes over. */
-static inline void mid_group(struct fsr *f, const struct up_col *c, const struct up_row *r, int x, int y, const struct block *b, vxk mask)
-{
-    const struct vt_plane *ho = &f->color[f->turn ^ 1];
-    float *ch = plane_row(&f->color[f->turn], y) + x;
-    const int first = f->frame == 0 || f->scene_changed;
-    if (!b->moving && !first) {
-        vx_store(ch, vx_blend(mask, vx_load(ch), vx_load(plane_row(ho, y) + x)));
-        return;
-    }
-    const vxf z = vs(&ZERO), one = vs(&ONE);
-    vxf color = z, center = z, moment = z;
-    for (int t = 0; t < 4; t++) {
-        const int sy = r->iy + t - 1;
-        color = vx_fma_s(vx_load(plane_row(&f->hc, sy) + x), &r->wy[t], color);
-        center = vx_fma_s(vx_load(plane_row(&f->hb, sy) + x), &r->ey[t], center);
-        moment = vx_fma_s(vx_load(plane_row(&f->hm, sy) + x), &r->ey[t], moment);
-    }
-    const vxf amin = vx_min(vx_load(plane_row(&f->hl, r->iy) + x), vx_load(plane_row(&f->hl, r->iy + 1) + x));
-    const vxf amax = vx_max(vx_load(plane_row(&f->hh, r->iy) + x), vx_load(plane_row(&f->hh, r->iy + 1) + x));
-    const vxf rcn = vx_mul_s(vx_load(c->rc), &r->rc);
-    center = vx_mul(center, rcn);
-    moment = vx_mul(moment, rcn);
-    color = vx_min(vx_max(color, amin), amax);
-    /* Inside the picture, the history has it; outside, this frame is all there is. */
-    const float dux VX_ALIGNED = (float)(R(b->mx) * f->scale_x), duy VX_ALIGNED = (float)(R(b->my) * f->scale_y), uw_f VX_ALIGNED = (float)f->uw;
-    const long double ry = R(y) + 0.5L + R(duy);
-    const vxf rx = vx_add(vx_load(c->x), vs(&dux));
-    const unsigned exist = !first && ry >= 0.0L && ry < R(f->uh) ? vx_cmp(z, rx, VX_CMP_LE) & vx_cmp(rx, vs(&uw_f), VX_CMP_LT) : 0u;
-    vxf out = color;
-    if (exist) {
-        vxf hist;
-        history_at(f, ho, x, y, b, &hist);
-        /* RectifyHistory, by how fast this block goes; then a frame's worth of what this frame shows, the less history the faster. */
-        static const float LUMA_BOX VX_ALIGNED = 1.7f, P15 VX_ALIGNED = 0.15f;
-        const float vel_box VX_ALIGNED = b->vel_box, dist VX_ALIGNED = b->dist, sqrt_r VX_ALIGNED = b->sqrt_reactive, vel_a VX_ALIGNED = b->vel_acc;
-        const vxf stddev = vx_sqrt(vx_abs(vx_fnma(center, center, moment), &ABS_LANE), &HALF, &THREE_HALVES);
-        const vxf tt = vx_max(vs(&vel_box), vx_max(vs(&dist), vs(&sqrt_r)));
-        const vxf box = vx_mul(vx_mul_s(stddev, &LUMA_BOX), vx_fnma(tt, vf(2.0f), vf(3.0f)));
-        hist = vx_min(vx_max(hist, vx_sub(center, box)), vx_add(center, box));
-        const vxf uw = vf(AVG_LANCZOS_WEIGHT);
-        const vxf hw = vx_add(vx_fma_s(vx_sub(vs(&P15), one), &vel_a, one), uw);
-        const vxf alpha = sat(vx_mul(uw, vx_rcp(hw, &ONE)), z, one);
-        out = vx_blend((vxk)exist, color, vx_max(z, vx_fma(vx_sub(color, hist), alpha, hist)));
-    }
-    vx_store(ch, vx_blend(mask, vx_load(ch), out));
-}
-
-static void stage_mid_acc(struct fsr *f, int tid, int n)
-{
-    const int y0 = row_of(f->uh, tid, n), y1 = row_of(f->uh, tid + 1, n);
-    for (int y = y0; y < y1; y++) {
-        const struct up_row *r = &f->rows[y];
-        const struct block *rowb = &f->blocks[r->by * f->bw];
-        for (int g = 0; g * 16 < f->uw; g++) {
-            const int x = g * 16;
-            const struct up_col *c = &f->cols[g];
-            const struct block *b0 = &rowb[c->block0], *b1 = &rowb[c->block1];
-            if (c->block0 == c->block1 || (b0->mx == b1->mx && b0->my == b1->my && b0->reactive == b1->reactive && b0->moving == b1->moving)) {
-                mid_group(f, c, r, x, y, b0, (vxk)0xffff);
-            } else {
-                unsigned lanes = 0;
-                for (int k = 0; k < 16; k++)
-                    lanes |= (unsigned)((int)floorl((R(x + k) + 0.5L) / f->scale_x) / BLOCK == c->block0) << k;
-                mid_group(f, c, r, x, y, b0, (vxk)lanes);
-                mid_group(f, c, r, x, y, b1, (vxk)(~lanes));
-            }
-        }
-    }
-    img_pad_rows(&f->color[f->turn], y0, y1);
-}
-
 static void stage_sharpen(struct fsr *f, int tid, int n)
 {
     const int y0 = row_of(f->uh, tid, n), y1 = row_of(f->uh, tid + 1, n);
@@ -1249,6 +1229,9 @@ static void stage_sharpen(struct fsr *f, int tid, int n)
 void fsr_stage(struct fsr *f, int stage, int tid, int n)
 {
     switch (stage) {
+    case FSR_CLEAR: clear_part(f, tid, n); break;
+    case FSR_FINISH: finish_part(f, tid, n); break;
+    case FSR_MARK: mark_part(f, tid, n); break;
     case FSR_REFINE: {
         const int nb = f->nmoving;
         for (int i = row_of(nb, tid, n); i < row_of(nb, tid + 1, n); i++)
@@ -1265,7 +1248,6 @@ void fsr_stage(struct fsr *f, int stage, int tid, int n)
     case FSR_REACT: stage_react(f, tid, n); break;
     case FSR_INST: stage_inst(f, tid, n); break;
     case FSR_ACC: stage_acc(f, tid, n); break;
-    case FSR_MID_ACC: stage_mid_acc(f, tid, n); break;
     case FSR_SHARPEN: stage_sharpen(f, tid, n); break;
     default: break;
     }
@@ -1274,7 +1256,8 @@ void fsr_stage(struct fsr *f, int stage, int tid, int n)
 void fsr_stage_end(struct fsr *f, int stage)
 {
     switch (stage) {
-    case FSR_REFINE: finish_blocks(f); break;
+    case FSR_CLEAR: list_moving(f); break;
+    case FSR_MARK: list_marked(f); break;
     case FSR_INPUT: img_pad_tb(&f->luma[f->turn]); break;
     case FSR_HPASS: {
         const struct vt_plane *all[5] = {&f->hc, &f->hb, &f->hm, &f->hl, &f->hh};
@@ -1308,9 +1291,6 @@ void fsr_stage_end(struct fsr *f, int stage)
             img_pad_tb(&f->hist[f->turn][i]);
         break;
     case FSR_SHARPEN: img_pad_tb(&f->out2[f->turn]); break;
-    case FSR_MID_ACC:
-        img_pad_tb(&f->color[f->turn]);
-        break;
     case FSR_ACC:
         img_pad_tb(&f->color[f->turn]);
         img_pad_tb(&f->lock[f->turn]);
@@ -1319,6 +1299,88 @@ void fsr_stage_end(struct fsr *f, int stage)
     }
 }
 
+
+/* ---- the frame between two finished pictures: the flow's middle vectors, at this size ---- */
+
+void fsr_mid_begin(struct fsr *f, const struct fg_field *mid)
+{
+    const int mw = f->rw;
+    f->mid_field = mid;
+    memset(f->mid_off, 0, (size_t)mid->w * (size_t)mid->h * sizeof(struct mid_off));
+    for (int i = 0; i < mid->w * mid->h; i++) {
+        const struct fg_vec *v = &mid->v[i];
+        if (!v->x && !v->y)
+            continue;
+        /* A whole step in this picture's pixels, rounded; half of it each way. The field is at half the render size. */
+        const int nx = 2 * v->x * f->uw, ny = 2 * v->y * f->uw;
+        const int fx = nx >= 0 ? (nx + mw / 2) / mw : -((-nx + mw / 2) / mw), fy = ny >= 0 ? (ny + mw / 2) / mw : -((-ny + mw / 2) / mw);
+        struct mid_off *o = &f->mid_off[i];
+        o->ax = (int16_t)(fx >> 1);
+        o->ay = (int16_t)(fy >> 1);
+        o->bx = (int16_t)(fx - (fx >> 1));
+        o->by = (int16_t)(fy - (fy >> 1));
+    }
+}
+
+/* Older at x + a, newer at x - b. Most of a picture from a still camera is one offset, and none: the mean of two pictures, which is also a little less noise. Where blocks differ, each under a window as wide as two blocks, so that no block's edge shows. */
+void fsr_mid_stage(struct fsr *f, int tid, int n)
+{
+    const int y0 = row_of(f->uh, tid, n), y1 = row_of(f->uh, tid + 1, n);
+    const struct vt_plane *a = &f->out2[f->turn ^ 1], *b = &f->out2[f->turn];
+    const struct fg_field *field = f->mid_field;
+    const vxf half = vs(&HALF);
+    const int only_newer = f->frame == 0 || f->scene_changed;
+    for (int y = y0; y < y1; y++) {
+        const struct mid_row *mr = &f->mid_rows[y];
+        float *d = plane_row(&f->mid, y);
+        for (int g = 0; g * 16 < f->uw; g++) {
+            const int x = g * 16;
+            const struct mid_col *mc = &f->mid_cols[g];
+            vxf v;
+            const struct mid_off *near[2][3];
+            int same = 1;
+            for (int r = 0; r < 2; r++)
+                for (int c = 0; c < 3; c++) {
+                    near[r][c] = &f->mid_off[clampi(mr->b0 + r, 0, field->h - 1) * field->w + clampi(mc->b0 + c, 0, field->w - 1)];
+                    same &= !memcmp(near[r][c], near[0][0], sizeof(struct mid_off));
+                }
+            if (only_newer) {
+                v = vx_load(plane_row(b, y) + x);
+            } else if (same) {
+                const struct mid_off *o = near[0][0];
+                v = vx_mul(vx_add(vx_loadu(row_ptr(a, x + o->ax, y + o->ay)), vx_loadu(row_ptr(b, x - o->bx, y - o->by))), half);
+            } else {
+                vxf acc = vx_zero();
+                for (int r = 0; r < 2; r++)
+                    for (int c = 0; c < 3; c++) {
+                        const struct mid_off *o = near[r][c];
+                        const vxf sum = vx_add(vx_loadu(row_ptr(a, x + o->ax, y + o->ay)), vx_loadu(row_ptr(b, x - o->bx, y - o->by)));
+                        acc = vx_fma(sum, vx_mul_s(vx_load(mc->w[c]), &mr->w[r]), acc);
+                    }
+                v = vx_mul(acc, half);
+            }
+            vx_store(d + x, v);
+        }
+    }
+    img_pad_rows(&f->mid, y0, y1);
+}
+
+void fsr_mid_end(struct fsr *f) { img_pad_tb(&f->mid); }
+
+/* A plane's row to bytes at its own size, by the vector, its last short group through a buffer. */
+static void bytes_row(const struct fsr *f, const struct vt_plane *src, int y, uint8_t *d)
+{
+    static const float TOP VX_ALIGNED = 255.0f;
+    const float *s = plane_row(src, y);
+    for (int x = 0; x + 16 <= f->uw; x += 16)
+        vx_store_u8(d + x, vx_mul_s(vx_load(s + x), &TOP));
+    if (f->uw & 15) {
+        uint8_t last[16] VX_ALIGNED;
+        const int x = f->uw & ~15;
+        vx_store_u8(last, vx_mul_s(vx_load(s + x), &TOP));
+        memcpy(d + x, last, (size_t)(f->uw & 15));
+    }
+}
 
 /* A picture on its way out: at this size, or by Lanczos down to dw x dh, across the columns of a row of source rows' sum. */
 /* One row of the second stage: down the columns first, since every lane of a source row is wanted, a row keeping a margin for the sideways taps; then sideways. */
@@ -1360,6 +1422,8 @@ size_t fsr_down_temp_bytes(const struct fsr *f) { return (size_t)f->temp_stride 
 
 static int down_row_wanted(const struct fsr *f, const uint8_t *row_used, int y)
 {
+    if (!f->dw)
+        return row_used[y];
     const struct down_row *r = &f->down_rows[y];
     int any = 0;
     for (int k = 0; k < DOWN_TAPS; k++)
@@ -1369,8 +1433,9 @@ static int down_row_wanted(const struct fsr *f, const uint8_t *row_used, int y)
 
 int fsr_down_span(const struct fsr *f, const uint8_t *row_used, int *y0, int *y1)
 {
-    int first = f->dh, last = 0;
-    for (int y = 0; y < f->dh; y++)
+    const int rows = f->dw ? f->dh : f->uh;
+    int first = rows, last = 0;
+    for (int y = 0; y < rows; y++)
         if (down_row_wanted(f, row_used, y)) {
             first = y < first ? y : first;
             last = y + 1;
@@ -1383,33 +1448,25 @@ int fsr_down_span(const struct fsr *f, const uint8_t *row_used, int *y0, int *y1
 void fsr_down_plane(const struct fsr *f, const struct vt_plane *src, const uint8_t *row_used, int y0, int y1, uint8_t *pixels, float *temp, int tid, int n)
 {
     const int a = y0 + row_of(y1 - y0, tid, n), b = y0 + row_of(y1 - y0, tid + 1, n);
+    const size_t width = (size_t)(f->dw ? f->dw : f->uw);
     for (int y = a; y < b; y++) {
-        uint8_t *d = pixels + (size_t)y * (size_t)f->dw;
-        if (down_row_wanted(f, row_used, y))
+        uint8_t *d = pixels + (size_t)y * width;
+        if (!down_row_wanted(f, row_used, y))
+            memset(d, 0, width);
+        else if (f->dw)
             down_row(f, src, y, d, temp);
         else
-            memset(d, 0, (size_t)f->dw);
+            bytes_row(f, src, y, d);
     }
 }
 
-void fsr_picture(const struct fsr *f, uint8_t *pixels, int tid, int n)
+void fsr_picture(const struct fsr *f, int mid, uint8_t *pixels, int tid, int n)
 {
-    static const float TOP VX_ALIGNED = 255.0f;
-    const struct vt_plane *src = &f->out2[f->turn];
+    const struct vt_plane *src = mid ? &f->mid : &f->out2[f->turn];
     if (!f->dw) {
         const int y0 = row_of(f->uh, tid, n), y1 = row_of(f->uh, tid + 1, n);
-        for (int y = y0; y < y1; y++) {
-            const float *s = plane_row(src, y);
-            uint8_t *d = pixels + (size_t)y * (size_t)f->uw;
-            for (int x = 0; x + 16 <= f->uw; x += 16)
-                vx_store_u8(d + x, vx_mul_s(vx_load(s + x), &TOP));
-            if (f->uw & 15) {
-                uint8_t last[16] VX_ALIGNED;
-                const int x = f->uw & ~15;
-                vx_store_u8(last, vx_mul_s(vx_load(s + x), &TOP));
-                memcpy(d + x, last, (size_t)(f->uw & 15));
-            }
-        }
+        for (int y = y0; y < y1; y++)
+            bytes_row(f, src, y, pixels + (size_t)y * (size_t)f->uw);
         return;
     }
     const int y0 = row_of(f->dh, tid, n), y1 = row_of(f->dh, tid + 1, n);

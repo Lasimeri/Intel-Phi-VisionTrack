@@ -73,7 +73,10 @@ struct shown {
 struct cam {
     double vs;        /* how much bigger than the camera its pane is: 1, or FSR's */
     int vw, vh;       /* its pane */
-    struct vt_result *row_at; /* FSR's camera: each recent instant's result, real then generated, waiting for its picture */
+    struct vt_result *row_at; /* each recent instant's result, real then generated, waiting for its picture if that comes on its own */
+    uint64_t shown_acq;       /* the instant of the last picture taken off the queue: anything older is too late */
+    uint64_t not_before_ns;   /* no picture taken off the queue before this */
+    uint64_t gen_cycles;      /* the card's time on the last generated picture */
     const char *dev;
     int w, h, fps;          /* what the device is asked for */
     double rate;            /* frames a second kept of those: the operator's order, 2026-11-03. Each is half of what is shown */
@@ -355,18 +358,18 @@ static void session_config(struct vt_config *c)
         c->flow_level = (uint32_t)A.flow_level;
         c->framegen = (uint32_t)A.framegen;
         c->gen_pictures = (uint32_t)A.framegen;
-        /* 720p15 doubled to 30 a second by the flow, at that size, every frame up to 1440p by FSR, and a Lanczos to 1080p: the user's order, 2026-11-03. */
+        /* 720p15 up to 1080p by FSR on real frames only, and the flow doubles the finished pictures to 30 a second: the user's order, 2026-11-04. */
         if (A.fsr && A.framegen) {
             c->fsr_camera = 3;
-            c->fsr_up_w = 2u * (uint32_t)A.c[2].w;
-            c->fsr_up_h = 2u * (uint32_t)A.c[2].h;
+            c->fsr_up_w = 0u;
+            c->fsr_up_h = 0u;
             c->fsr_w = 3u * (uint32_t)A.c[2].w / 2u;
             c->fsr_h = 3u * (uint32_t)A.c[2].h / 2u;
             c->fsr_sharp = A.fsr_sharp;
             c->vec_overlay = (uint32_t)A.vec;
             c->gimbal_ref = (uint32_t)A.gimbal_ref;
             c->fsr_async = 1;
-            /* L and R's generated pictures are only for the eye: the tracker never reads them. --lr-gen 0 gives their time to FSR. */
+            /* Generated pictures are only for the eye: the tracker never reads them. --lr-gen 0 gives L and R's time to FSR. */
             c->gen_cameras = A.lr_gen ? 0u : 1u << 2;
         }
     }
@@ -412,6 +415,11 @@ static void show_push(struct cam *K, const struct vt_result *r, const uint8_t *p
         const uint64_t most = K->rate > 0.0 ? (uint64_t)(2.5e9 / K->rate) : 100000000ull, want = (uint64_t)s[ARRIVALS * 19 / 20] * 1000u + SHOW_MARGIN_NS;
         K->delay_ns = want < most ? want : most;
     }
+    /* Too late: a newer picture has been shown, and going back would be worse than a gap. */
+    if (acq <= K->shown_acq) {
+        K->passed++;
+        return;
+    }
     struct shown *s = &K->q[K->q_in % SHOW_Q];
     s->at_ns = acq + K->delay_ns;
     s->recv_ns = now;
@@ -422,6 +430,16 @@ static void show_push(struct cam *K, const struct vt_result *r, const uint8_t *p
     if (K->q_in - K->q_out > SHOW_Q) {
         K->q_out = K->q_in - SHOW_Q;
         K->passed++;
+    }
+    /* In order of their instants. A generated picture is made on another team and comes after the real frame that follows it. */
+    for (uint64_t i = K->q_in - 1; i > K->q_out; i--) {
+        struct shown *newer = &K->q[(i - 1) % SHOW_Q], *older = &K->q[i % SHOW_Q];
+        if (newer->r.hdr.acq_ns <= older->r.hdr.acq_ns)
+            break;
+        static struct shown swap;
+        memcpy(&swap, newer, sizeof swap);
+        memcpy(newer, older, sizeof swap);
+        memcpy(older, &swap, sizeof swap);
     }
 }
 
@@ -437,6 +455,7 @@ static void *link_main(void *arg)
     FILE *pf[VT_MAX_CAMERAS] = {NULL, NULL, NULL}, *track_csv = NULL, *depth_csv = NULL, *gim_csv = NULL;
     uint64_t fsr_seen = 0, depth_seen = 0, vec_seen = 0;
     uint64_t cells_seen[VT_CELL_CAMERAS] = {0, 0};
+    uint64_t gen_seen[VT_GEN_CAMERAS] = {0, 0, 0};
     unsigned depth_lines = 0;
     double pair_last[VT_MAX_CAMERAS][4];
     for (int k = 0; k < VT_MAX_CAMERAS; k++)
@@ -473,6 +492,7 @@ static void *link_main(void *arg)
             pub = seen = depth_seen = 0;
             vec_seen = 0;
             cells_seen[0] = cells_seen[1] = 0;
+            gen_seen[0] = gen_seen[1] = gen_seen[2] = 0;
             stride = vt_slot_stride(&cfg);
             for (int k = 0; k < A.ncam; k++)
                 sent[k] = __atomic_load_n(&A.c[k].captured, __ATOMIC_ACQUIRE);
@@ -608,12 +628,11 @@ static void *link_main(void *arg)
             K->results++;
             K->generated += generated;
             K->recv_ns = vt_now_ns();
-            /* FSR's camera: the picture comes later and on its own; what was known of that instant waits for it. */
-            if (K->row_at) {
+            if (K->row_at)
                 memcpy(&K->row_at[(K->last.hdr.instance & 15u) * 2u + (generated != 0)], &K->last, offsetof(struct vt_result, feat) + (size_t)K->last.nfeat * sizeof(struct vt_feat_out));
-            } else
-            /* What this result is a picture of: a generated picture from the part, a real one from this window's ring, where its place travelled with the frame. */
-            if (generated) {
+            /* FSR's camera: the picture comes later and on its own; what was known of that instant waits for it. Any other: a real picture is in this window's ring, where its place travelled with the frame, and a generated one is in the part, here if it came with its row, and if not it comes by gen_pub. */
+            if (A.fsr && (int)k == A.fsr_cam) {
+            } else if (generated) {
                 if (fresh->picture)
                     show_push(K, &K->last, A.l.part + vt_gen_offset(k, fresh->picture - 1), 1);
             } else {
@@ -653,6 +672,22 @@ static void *link_main(void *arg)
             pthread_mutex_unlock(&A.m);
             did = 1;
         }
+        /* A generated picture made on the second team: its row came ahead of it, and the real frame after it too. */
+        for (int gc = 0; gc < A.ncam && gc < VT_GEN_CAMERAS; gc++) {
+            const uint64_t gp = c->gen_pub[gc];
+            if (gp == gen_seen[gc])
+                continue;
+            gen_seen[gc] = gp;
+            struct vt_gen_meta gm;
+            memcpy(&gm, &c->gen_meta[gc], sizeof gm);
+            struct cam *G = &A.c[gc];
+            const struct vt_result *row = &G->row_at[(gm.instance & 15u) * 2u + 1u];
+            pthread_mutex_lock(&A.m);
+            G->gen_cycles = gm.cycles_make;
+            if (gm.slot < VT_GEN_SLOTS && row->hdr.instance == gm.instance)
+                show_push(G, row, A.l.part + vt_gen_offset((uint32_t)gc, gm.slot), 1);
+            pthread_mutex_unlock(&A.m);
+        }
         /* Two pictures from FSR when they are ready, each due at its own instant: 30 a second from 15. */
         const uint64_t fp = c->fsr_pub;
         if (A.fsr && fp != fsr_seen) {
@@ -662,7 +697,7 @@ static void *link_main(void *arg)
             struct cam *F = &A.c[A.fsr_cam];
             const struct vt_result *row_real = &F->row_at[(finst & 15u) * 2u], *row_mid = &F->row_at[(finst & 15u) * 2u + 1u];
             pthread_mutex_lock(&A.m);
-            /* One picture at a time now, each as soon as it exists; the other slot says none. */
+            /* Both together, in order. A frame let go has no picture half way: its slot says none. */
             if (fmid < VT_FSR_SLOTS && row_mid->hdr.instance == finst)
                 show_push(F, row_mid, A.l.part + vt_fsr_offset(fmid), 1);
             if (fslot < VT_FSR_SLOTS && row_real->hdr.instance == finst)
@@ -1004,9 +1039,6 @@ static void layout(int *win_w, int *win_h)
         A.c[2].vs = 1.5;
         A.c[2].vw = 3 * A.c[2].w / 2;
         A.c[2].vh = 3 * A.c[2].h / 2;
-        A.c[2].row_at = calloc(32, sizeof(struct vt_result));
-        if (!A.c[2].row_at)
-            exit(2);
     }
     const struct cam *a = &A.c[0], *b = &A.c[1], *c = &A.c[2];
     pane[0] = (struct pane){0, 0, a->w, a->h};
@@ -1446,7 +1478,7 @@ int main(int argc, char **argv)
     A.flow_level = 1;
     A.framegen = 1;
     A.fsr = 1;
-    A.lr_gen = 0; /* L and R are only reference: native 30 a second, the operator's order, 2026-11-03. --lr-gen 1 doubles them again */
+    A.lr_gen = 1; /* L and R doubled to 60 by the flow on the second team, the operator's order, 2026-11-04. --lr-gen 0: native 30 */
     A.fsr_sharp = 0.4f; /* AMD: (1 - 0.8) x 2 stops, its sample's default */
     A.vec = 1;
     A.ref = 1;
@@ -1503,7 +1535,8 @@ int main(int argc, char **argv)
     for (int k = 0; k < A.ncam; k++) {
         A.c[k].ring = malloc((size_t)RING * (size_t)A.c[k].w * (size_t)A.c[k].h);
         A.c[k].q = malloc(SHOW_Q * sizeof(struct shown));
-        if (!A.c[k].ring || !A.c[k].q)
+        A.c[k].row_at = calloc(32, sizeof(struct vt_result));
+        if (!A.c[k].ring || !A.c[k].q || !A.c[k].row_at)
             return 2;
     }
     if (vt_link_open(&A.l))
@@ -1653,10 +1686,18 @@ int main(int argc, char **argv)
             delay_ms[k] = (double)K->delay_ns * 1e-6;
             const struct shown *due = NULL;
             uint64_t taken = 0;
-            while (K->q_out < K->q_in && K->q[K->q_out % SHOW_Q].at_ns <= due_ns) {
-                due = &K->q[K->q_out % SHOW_Q];
-                K->q_out++;
-                taken++;
+            /* Each picture in turn, at least part of a picture's time apart, or one that came late and its successor would fall due together and only the newer would show: 15.83 of D's 30 a second, 2026-11-04. A real backlog is still caught up. */
+            if (due_ns >= K->not_before_ns) {
+                while (K->q_out < K->q_in && K->q[K->q_out % SHOW_Q].at_ns <= due_ns) {
+                    due = &K->q[K->q_out % SHOW_Q];
+                    K->shown_acq = due->r.hdr.acq_ns;
+                    K->q_out++;
+                    taken++;
+                    if (K->q_in - K->q_out < 3)
+                        break;
+                }
+                if (due && K->rate > 0.0)
+                    K->not_before_ns = due_ns + (uint64_t)(0.375e9 / K->rate);
             }
             if (due) {
                 memcpy(&r[k], &due->r, offsetof(struct vt_result, feat) + (size_t)due->r.nfeat * sizeof(struct vt_feat_out));
@@ -1914,7 +1955,7 @@ int main(int argc, char **argv)
             }
             panel_line(&v, &y, DIM, "correspondences %llu  contrast %s  blur %s", (unsigned long long)pairs, contrast ? "on" : "off", pre_gauss ? "on" : "off");
             if (A.fsr)
-                panel_line(&v, &y, DIM, "D: flow 720p%.4g > 720p%.4g > FSR 1440p > Lanczos 1080p  RCAS %.1f stops  [ ] change it", A.c[2].rate, 2.0 * A.c[2].rate, (double)A.fsr_sharp);
+                panel_line(&v, &y, DIM, "D: 720p%.4g > FSR 1080p%.4g > flow 1080p%.4g  RCAS %.1f stops  [ ] change it", A.c[2].rate, A.c[2].rate, 2.0 * A.c[2].rate, (double)A.fsr_sharp);
             if (A.ncam == 3 && map) {
                 const struct vt_depth_out *h = map;
                 const double us = 1e-3 / TSC_HZ * 1e6;
@@ -1925,6 +1966,8 @@ int main(int argc, char **argv)
                 panel_line(&v, &y, GREY, " card ms: normalize %.1f sweep %.1f agg %.1f decide %.1f", (double)h->cycles_normalize * us, (double)h->cycles_sweep * us, (double)h->cycles_aggregate * us, (double)h->cycles_decide * us);
                 panel_line(&v, &y, GREY, " flow at level %u: L %u x %u cells", h->flow_level, h->cam[0].cols, h->cam[0].rows);
                 panel_line(&v, &y, GREY, " vectors ms L %.1f R %.1f D %.1f  moving %u %u %u", (double)h->cam[0].cycles_vectors * us, (double)h->cam[1].cycles_vectors * us, (double)h->cam[2].cycles_vectors * us, h->cam[0].moving, h->cam[1].moving, h->cam[2].moving);
+                if (A.lr_gen)
+                    panel_line(&v, &y, GREY, " flow on the second team, ms: L %.1f R %.1f", (double)A.c[0].gen_cycles * us, (double)A.c[1].gen_cycles * us);
                 if (A.vec && A.vec_count) {
                     static const char *const gim_names[4] = {"none yet", "unsure", "still", "MOVED"};
                     panel_line(&v, &y, GREY, " D's own reference: %u windows, %s, read %+.2f %+.2f px, %.1f ms on the spare core", A.vec_last.gim_windows, gim_names[A.vec_last.gim_state & 3u], (double)A.vec_last.gim_read_u, (double)A.vec_last.gim_read_v, (double)A.vec_last.cycles_gim * us);

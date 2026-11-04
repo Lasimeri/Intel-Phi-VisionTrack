@@ -129,13 +129,13 @@ struct tracker {
     struct detect_job det;
     /* Frame generation. The pyramid goes on above the tracker's own levels, per set; the field starts at the tracker's level 1. */
     struct fg_job fg;
-    struct vt_plane fg_more[3][FG_MAX_LEVELS];
+    struct vt_plane fg_more[MAX_SETS][FG_MAX_LEVELS];
     int fg_levels, fg_hist_set;
     struct box_at { uint32_t state; float cx, cy, w, h; } was, is; /* the region at the last two real frames: a generated row lies between them */
     float pt_ox, pt_oy, pt_mx, pt_my, pt_sx, pt_sy; /* from the head to the point; from the head to the middle of its members, and that middle's scatter */
     int pt_known, pt_off, kf_unproven; /* the offset has been read; the box is not on the thing; the filter holds what was measured from a box at rest */
     struct kf_lock kf_lock;
-    uint8_t fg_ready[3];
+    uint8_t fg_ready[MAX_SETS];
     void *fg_mem;
     uint64_t fg_cycles[9], fg_runs;
     struct fsr *fsr;
@@ -143,15 +143,17 @@ struct tracker {
     tk_run_fn run_fsr;
     void *fsr_ctx;
     uint8_t *fsr_pic[2];    /* the generated instant's, the real one's */
-    /* What FSR is given for a real frame, taken when it is handed over: the camera's next frame may come while it works. */
-    struct fsr_take { struct vt_plane a, b, mid; struct fg_field field; int scene_changed, skipped; } fsr_job;
-    /* The generated frames FSR reads, in turn: where a real frame's pyramid is built next is no place for one that may be read after that. */
-    struct vt_plane fsr_mid[2];
-    int fsr_mid_turn;
+    int fsr_skipped; /* real frames let go since FSR last had one */
     int fsr_which;
     uint64_t fsr_cycles[FSR_STAGES + 1], fsr_runs;
     uint64_t fsr_mid_cycles, fsr_mid_runs;
     uint8_t *fg_pic; /* where a generated frame's picture goes, for the window; none: it stays for the tracker alone, and is made only for a region */
+    /* Flow apart from the tracker, on FSR's team: the pair of frames planned, the pair being worked on, and a plane of its own to make the frame in, since where the next real frame is built is being written meanwhile. */
+    int flow_apart, fg_plan_p, fg_plan_set, fg_run_p, fg_run_set;
+    struct vt_plane fg_own;
+    uint64_t fg_last_cycles;
+    void (*fsr_between)(void *);
+    void *fsr_between_ctx;
     uint64_t last_est_ns;
     /* filter */
     struct kf kf;
@@ -160,7 +162,7 @@ struct tracker {
 
 /* ---- parallel jobs ---- */
 
-enum { OP_U8, OP_NORM_IN, OP_GAUSS_IN, OP_REDUCE, OP_DIFF, OP_LK, OP_STEREO, OP_SEARCH, OP_DET_TENSOR, OP_DET_RESPONSE, OP_DET_CELLS, OP_FG_MORE, OP_FG_HIST_A, OP_FG_HIST_B, OP_FG_SEARCH, OP_FG_FILTER, OP_FG_UP, OP_FG_MID, OP_FG_BLEND, OP_FG_PAD, OP_FG_PICTURE, OP_FSR, OP_FSR_PICTURE };
+enum { OP_U8, OP_NORM_IN, OP_GAUSS_IN, OP_REDUCE, OP_DIFF, OP_LK, OP_STEREO, OP_SEARCH, OP_DET_TENSOR, OP_DET_RESPONSE, OP_DET_CELLS, OP_FG_MORE, OP_FG_HIST_A, OP_FG_HIST_B, OP_FG_SEARCH, OP_FG_FILTER, OP_FG_UP, OP_FG_MID, OP_FG_BLEND, OP_FG_PAD, OP_FG_PICTURE, OP_FSR, OP_FSR_MID, OP_FSR_PICTURE };
 #define FG_CHUNK 16 /* blocks taken at a time */
 
 struct job {
@@ -383,8 +385,11 @@ static void job_main(void *arg, int tid, int n)
     case OP_FSR:
         fsr_stage(t->fsr, j->level, tid, n);
         break;
+    case OP_FSR_MID:
+        fsr_mid_stage(t->fsr, tid, n);
+        break;
     case OP_FSR_PICTURE:
-        fsr_picture(t->fsr, t->fsr_pic[t->fsr_which], tid, n);
+        fsr_picture(t->fsr, !t->fsr_which, t->fsr_pic[t->fsr_which], tid, n);
         break;
     case OP_FG_PICTURE:
         img_q6_to_u8_vx(&t->fg.out, t->fg_pic, row_of(t->fg.out.h, tid, n), row_of(t->fg.out.h, tid + 1, n));
@@ -463,7 +468,8 @@ struct tracker *tk_create(const struct vt_config *cfg, int threads_pyr, int thre
     t->h = (int)cfg->height;
     t->levels = (int)cfg->levels;
     t->threads_track = threads_track;
-    t->nsets = cfg->pipelines == 2 ? MAX_SETS : cfg->framegen ? 3 : 2;
+    /* Flow on a team of its own reads two frames while this one goes on: a set more, so that it has three frames' time before the tracker would have to wait. */
+    t->nsets = cfg->pipelines == 2 ? MAX_SETS : cfg->framegen ? (cfg->fsr_async ? 4 : 3) : 2;
     if (cfg->framegen && (cfg->pipelines == 2 || cfg->levels < 3)) {
         fprintf(stderr, "track: frame generation needs one pipeline and three pyramid levels\n");
         return NULL;
@@ -544,7 +550,7 @@ struct tracker *tk_create(const struct vt_config *cfg, int threads_pyr, int thre
         for (int i = 0; i < FG_MAX_LEVELS && w >= 16 && h >= 16; i++) {
             count++;
             if (i >= t->levels - 1)
-                for (int s = 0; s < 3; s++)
+                for (int s = 0; s < t->nsets; s++)
                     if (zeroed_plane(&t->fg_more[s][i], w, h, alloc, actx))
                         return NULL;
             w = (w + 1) / 2;
@@ -635,14 +641,21 @@ void tk_fg_report(const struct tracker *t, const char *name, double cycles_per_u
     fprintf(stderr, "\n");
 }
 
+static void run_fsr_op(struct tracker *t, int op);
+
 static void fg_build_more(struct tracker *t, int set)
 {
     if (t->fg_ready[set])
         return;
-    struct job *j = t->jp;
-    j->set = set;
     for (int i = t->levels - 1; i < t->fg_levels; i++) {
-        run_build_op(t, OP_FG_MORE, i);
+        if (t->flow_apart) {
+            t->jf->set = set;
+            t->jf->level = i;
+            run_fsr_op(t, OP_FG_MORE);
+        } else {
+            t->jp->set = set;
+            run_build_op(t, OP_FG_MORE, i);
+        }
         img_pad_tb(&t->fg_more[set][i]);
     }
     t->fg_ready[set] = 1;
@@ -671,7 +684,8 @@ int tk_rig_moved(struct tracker *t, long double du, long double dv)
 
 int tk_fsr_setup(struct tracker *t, int up_w, int up_h, int w, int h, long double sharpness, tk_alloc_fn alloc, void *ctx, uint8_t *pixels_generated, uint8_t *pixels_real, tk_run_fn run, void *run_ctx)
 {
-    t->jf = need(alloc, ctx, sizeof *t->jf);
+    if (!t->jf)
+        t->jf = need(alloc, ctx, sizeof *t->jf);
     if (!t->jf)
         return -1;
     t->jf->t = t;
@@ -688,12 +702,6 @@ int tk_fsr_setup(struct tracker *t, int up_w, int up_h, int w, int h, long doubl
         return -1;
     t->fsr_pic[0] = pixels_generated;
     t->fsr_pic[1] = pixels_real;
-    if (zeroed_plane(&t->fsr_mid[0], t->w, t->h, alloc, ctx) || zeroed_plane(&t->fsr_mid[1], t->w, t->h, alloc, ctx))
-        return -1;
-    t->fsr_job.field = t->fg.fil[0];
-    t->fsr_job.field.v = need(alloc, ctx, (size_t)t->fg.fil[0].w * (size_t)t->fg.fil[0].h * sizeof(struct fg_vec));
-    if (!t->fsr_job.field.v)
-        return -1;
     return 0;
 }
 
@@ -706,60 +714,76 @@ static void run_fsr_op(struct tracker *t, int op)
     t->run_fsr(t->fsr_ctx, job_main, j);
 }
 
-void tk_fsr_take(struct tracker *t, int skipped)
+int tk_flow_apart(struct tracker *t, tk_alloc_fn alloc, void *ctx, tk_run_fn run, void *run_ctx)
 {
-    const struct fg_job *g = &t->fg;
-    struct fsr_take *k = &t->fsr_job;
-    k->a = g->a0;
-    k->b = g->b0;
-    k->mid = g->out;
-    memcpy(k->field.v, g->fil[0].v, (size_t)k->field.w * (size_t)k->field.h * sizeof(struct fg_vec));
-    k->scene_changed = g->scene_changed;
-    k->skipped = skipped;
+    if (!t->jf)
+        t->jf = need(alloc, ctx, sizeof *t->jf);
+    if (!t->jf)
+        return -1;
+    t->jf->t = t;
+    t->run_fsr = run;
+    t->fsr_ctx = run_ctx;
+    if (!t->fsr && zeroed_plane(&t->fg_own, t->w, t->h, alloc, ctx))
+        return -1;
+    t->flow_apart = 1;
+    return 0;
 }
 
-void tk_fsr_one(struct tracker *t, int which)
+void tk_flow_take(struct tracker *t, int skipped)
 {
-    /* The flow has come first, at the camera's size. Its frame goes through FSR read only, half a real step from the history; the real one does all of FSR, a whole step, from the last real one. The operator's order for every frame upscaled, and 33 ms for each: 2026-11-03. */
+    t->fg_run_p = t->fg_plan_p;
+    t->fg_run_set = t->fg_plan_set;
+    t->fsr_skipped = skipped;
+}
+
+int tk_flow_reads(const struct tracker *t, int set) { return set == t->fg_run_p || set == t->fg_run_set; }
+
+uint64_t tk_flow_cycles(const struct tracker *t) { return t->fg_last_cycles; }
+
+void tk_fsr_between(struct tracker *t, void (*fn)(void *), void *ctx)
+{
+    t->fsr_between = fn;
+    t->fsr_between_ctx = ctx;
+}
+
+int tk_fsr_one(struct tracker *t)
+{
+    /* Real frames only, whole steps: nothing in the history is invented. The frame between two pictures is made afterwards, from the pictures, the operator's order, 2026-11-04. Not across a frame let go: the middle vectors are of the last two frames, and these pictures lie further apart. */
     struct job *j = t->jf;
     uint64_t mark = vt_tsc();
-    const struct fsr_take *k = &t->fsr_job;
-    t->fsr_which = which;
-    if (!which) {
-        static const int STAGES[4] = {FSR_INPUT, FSR_HPASS, FSR_MID_ACC, FSR_SHARPEN};
-        fsr_begin(t->fsr, &k->mid, &k->a, &k->field, 0.5L, 1.0L + 2.0L * (long double)k->skipped, k->scene_changed);
-        fsr_stage_end(t->fsr, FSR_REFINE);
-        for (int s = 0; s < 4; s++) {
-            j->level = STAGES[s];
-            run_fsr_op(t, OP_FSR);
-            fsr_stage_end(t->fsr, STAGES[s]);
-        }
-        run_fsr_op(t, OP_FSR_PICTURE);
-        t->fsr_mid_cycles += vt_tsc() - mark;
-        t->fsr_mid_runs++;
-        return;
-    }
-    fsr_begin(t->fsr, &k->b, &k->a, &k->field, 1.0L, 1.0L + (long double)k->skipped, k->scene_changed);
+    const struct fg_job *g = &t->fg;
+    fsr_begin(t->fsr, &g->b0, &g->a0, &g->fil[0], 1.0L + (long double)t->fsr_skipped, g->scene_changed);
     for (int s = 0; s < FSR_STAGES; s++) {
         j->level = s;
         run_fsr_op(t, OP_FSR);
         fsr_stage_end(t->fsr, s);
         const uint64_t now = vt_tsc();
         t->fsr_cycles[s] += now - mark;
+        if (t->fsr_between)
+            t->fsr_between(t->fsr_between_ctx);
+        mark = vt_tsc();
+    }
+    const int with_mid = !t->fsr_skipped;
+    if (with_mid) {
+        fsr_mid_begin(t->fsr, &g->mid);
+        run_fsr_op(t, OP_FSR_MID);
+        fsr_mid_end(t->fsr);
+        t->fsr_which = 0;
+        run_fsr_op(t, OP_FSR_PICTURE);
+        const uint64_t now = vt_tsc();
+        t->fsr_mid_cycles += now - mark;
+        t->fsr_mid_runs++;
         mark = now;
     }
+    t->fsr_which = 1;
     run_fsr_op(t, OP_FSR_PICTURE);
     fsr_end(t->fsr);
     t->fsr_cycles[FSR_STAGES] += vt_tsc() - mark;
     t->fsr_runs++;
+    return with_mid;
 }
 
-void tk_fsr_frame(struct tracker *t)
-{
-    tk_fsr_take(t, 0);
-    tk_fsr_one(t, 0);
-    tk_fsr_one(t, 1);
-}
+void tk_fsr_frame(struct tracker *t) { tk_fsr_one(t); }
 
 const struct fsr *tk_fsr_of(const struct tracker *t) { return t->fsr; }
 
@@ -767,7 +791,7 @@ void tk_fsr_report(const struct tracker *t, const char *name, double cycles_per_
 {
     if (!t->fsr_runs)
         return;
-    static const char *const stage[FSR_STAGES + 1] = {"refine", "input", "hpass", "diff", "mip0", "mip1", "mip2", "sc", "react", "inst", "acc", "sharpen", "picture"};
+    static const char *const stage[FSR_STAGES + 1] = {"clear", "refine", "finish", "mark", "input", "hpass", "diff", "mip0", "mip1", "mip2", "sc", "react", "inst", "acc", "sharpen", "picture"};
     double total = 0.0;
     fprintf(stderr, "%s: FSR, %llu frames, us each:", name, (unsigned long long)t->fsr_runs);
     for (int i = 0; i <= FSR_STAGES; i++) {
@@ -778,13 +802,38 @@ void tk_fsr_report(const struct tracker *t, const char *name, double cycles_per_
     fprintf(stderr, " total %.0f; generated frames %llu, us each %.0f\n", total, (unsigned long long)t->fsr_mid_runs, t->fsr_mid_runs ? (double)t->fsr_mid_cycles / (double)t->fsr_mid_runs / cycles_per_us : 0.0);
 }
 
-int tk_generate(struct tracker *t, int set, const struct vt_msg *m, struct vt_msg *gm)
+int tk_generate_plan(struct tracker *t, int set, const struct vt_msg *m, struct vt_msg *gm)
 {
     /* A generated frame is for the eye: the window doubles every camera whether or not anything is selected, and nothing else may read it. */
     if (!t->c.framegen || !t->fg_pic || t->prev < 0 || t->prev == set)
         return -1;
-    const int p = t->prev, g = (set + 1) % t->nsets;
-    uint64_t mark = vt_tsc();
+    t->fg_plan_p = t->prev;
+    t->fg_plan_set = set;
+    *gm = *m;
+    gm->cmd = VT_CMD_NONE;
+    gm->sc_key = 0;
+    gm->dest = 0;
+    gm->generated = 1;
+    gm->acq_ns = t->last_acq_ns + (m->acq_ns - t->last_acq_ns) / 2u;
+    return (set + 1) % t->nsets;
+}
+
+static void fg_run_op(struct tracker *t, int op, int level)
+{
+    if (t->flow_apart) {
+        t->jf->level = level;
+        run_fsr_op(t, op);
+    } else {
+        t->jt->level = level;
+        run_track_op(t, op, VT_ALG_MVEX);
+    }
+}
+
+void tk_generate_make(struct tracker *t)
+{
+    const int p = t->fg_run_p, set = t->fg_run_set, g = (set + 1) % t->nsets;
+    const uint64_t start = vt_tsc();
+    uint64_t mark = start;
 #define FG_LAP(stage)                       \
     do {                                    \
         const uint64_t lap_now = vt_tsc();  \
@@ -802,46 +851,51 @@ int tk_generate(struct tracker *t, int set, const struct vt_msg *m, struct vt_ms
     }
     f->a0 = t->pyr[p][0].l[0];
     f->b0 = t->pyr[set][0].l[0];
-    f->out = t->fsr ? t->fsr_mid[t->fsr_mid_turn ^= 1] : t->pyr[g][0].l[0];
+    f->out = t->flow_apart ? t->fg_own : t->pyr[g][0].l[0];
     /* The older frame's histogram is last time's newer one, if there was a last time. */
     if (t->fg_hist_set == p) {
         uint32_t *s = f->hist_a;
         f->hist_a = f->hist_b;
         f->hist_b = s;
     } else {
-        run_track_op(t, OP_FG_HIST_A, VT_ALG_MVEX);
+        fg_run_op(t, OP_FG_HIST_A, 0);
     }
-    run_track_op(t, OP_FG_HIST_B, VT_ALG_MVEX);
+    fg_run_op(t, OP_FG_HIST_B, 0);
     t->fg_hist_set = set;
     f->scene_changed = fg_scene_verdict(f);
     FG_LAP(1);
-    struct job *j = t->jt;
     for (int L = t->fg_levels - 1; L >= 0; L--) {
-        j->level = L;
-        run_track_op(t, OP_FG_SEARCH, VT_ALG_MVEX);
+        fg_run_op(t, OP_FG_SEARCH, L);
         FG_LAP(2);
-        run_track_op(t, OP_FG_FILTER, VT_ALG_MVEX);
+        fg_run_op(t, OP_FG_FILTER, L);
         FG_LAP(3);
         if (L > 0)
-            run_track_op(t, OP_FG_UP, VT_ALG_MVEX);
+            fg_run_op(t, OP_FG_UP, L);
         FG_LAP(4);
     }
-    run_track_op(t, OP_FG_MID, VT_ALG_MVEX);
+    fg_run_op(t, OP_FG_MID, 0);
     FG_LAP(5);
-    run_track_op(t, OP_FG_BLEND, VT_ALG_MVEX);
-    FG_LAP(6);
-    run_track_op(t, OP_FG_PAD, VT_ALG_MVEX);
-    img_pad_tb(&f->out);
-    FG_LAP(7);
-    run_track_op(t, OP_FG_PICTURE, VT_ALG_MVEX);
-    FG_LAP(8);
+    /* Through FSR the frame is made from its finished pictures: only the vectors are wanted here. */
+    if (!t->fsr) {
+        fg_run_op(t, OP_FG_BLEND, 0);
+        FG_LAP(6);
+        fg_run_op(t, OP_FG_PAD, 0);
+        img_pad_tb(&f->out);
+        FG_LAP(7);
+        fg_run_op(t, OP_FG_PICTURE, 0);
+        FG_LAP(8);
+    }
 #undef FG_LAP
-    *gm = *m;
-    gm->cmd = VT_CMD_NONE;
-    gm->sc_key = 0;
-    gm->dest = 0;
-    gm->generated = 1;
-    gm->acq_ns = t->last_acq_ns + (m->acq_ns - t->last_acq_ns) / 2u;
+    t->fg_last_cycles = vt_tsc() - start;
+}
+
+int tk_generate(struct tracker *t, int set, const struct vt_msg *m, struct vt_msg *gm)
+{
+    const int g = tk_generate_plan(t, set, m, gm);
+    if (g >= 0) {
+        tk_flow_take(t, 0);
+        tk_generate_make(t);
+    }
     return g;
 }
 

@@ -1,10 +1,9 @@
-/* vecdraw.h: a camera's moved cells, drawn as lines over its picture at the upscaled size, before that picture is brought down.
+/* vecdraw.h: a camera's moved cells, drawn as lines over its picture at the size FSR makes it.
  *
- * The pictures are one channel, so the lines cannot go into them: they go into a plane of their own, 0 or 1 per pixel, which the second stage's Lanczos brings down
- * with the same tables as the picture, and the window tints the picture by it.
+ * The pictures are one channel, so the lines cannot go into them: they go into a plane of their own, 0 or 1 per pixel, which goes out to bytes with any second stage the picture has, and the window tints the picture by it.
  *
  * One thread draws. The last frame's lines are drawn again in zero rather than the plane being cleared: a frame moves a few hundred lines, and a clear would touch
- * every line of a plane of about 15 MiB. The rows touched are marked, so what brings the plane down can pass over the rest. */
+ * every line of a plane of about 8 MiB. The rows touched are marked, so what takes the plane out can pass over the rest. */
 #ifndef VT_VECDRAW_H
 #define VT_VECDRAW_H
 

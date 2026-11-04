@@ -279,44 +279,52 @@ static void *pyramid_main(void *arg)
     return NULL;
 }
 
-/* FSR apart from the tracker: a team on each core's third and fourth hardware threads, which the tracker does not use. It shares the cores, so it slows the tracker while both run, but the tracker never waits for it. Busy when a frame arrives, it lets that frame go: a picture late is no use, and a tracker late is worse. */
-/* L or R's vectors and mean, one frame at a time, handed to the team below: they must not wait for a gap in the frames. The buffer it fills is copied by the session. */
-struct cam_job {
-    const struct vt_plane *cur;
-    uint64_t instance;
+/* Optical flow and FSR apart from the tracker, the operator's order, 2026-11-04: a team on each core's third and fourth hardware threads, which the tracker does not use. It shares the cores, so it slows the tracker while both run, but the tracker never waits for it. Busy when a frame arrives, the newest waits and the one it replaces is let go: a picture late is no use, and a tracker late is worse. */
+struct flow_slot {
+    struct tracker *t;
     uint32_t seen;
     uint32_t want VT_CACHELINE, done VT_CACHELINE;
 };
 
 struct fsr_worker {
-    struct tracker *t;
     int cpus[256], core_of[256], n;
     struct team *team;
-    uint64_t instance;
-    uint32_t want VT_CACHELINE, ready_mid VT_CACHELINE, ready VT_CACHELINE, sent VT_CACHELINE;
-    int stop VT_CACHELINE, team_ok, frames, dropped;
-    struct live_depth *ld;
-    struct cam_job cams[VT_CELL_CAMERAS];
-    int ncams;
+    struct flow_slot slots[VT_MAX_CAMERAS];
+    int fsr_cam, next, inside_left;
+    int ncams VT_CACHELINE;
+    int stop VT_CACHELINE, team_ok, frames, dropped, with_mid;
 };
 
 static void fsr_worker_run(void *ctx, tk_fn fn, void *arg) { team_run(((struct fsr_worker *)ctx)->team, fn, arg); }
 
-/* Whatever camera has a frame waiting, on this team, on its first thread. Between FSR's frames and while it waits, never inside one: a job of about 5 ms, 60 a second, inside FSR's 47 ms took its frames past the camera's 66 (D 29.20 to about 21 pictures a second, measured). So each camera gets one at least for every frame FSR makes. */
-static void fsr_worker_cams(void *arg)
+/* One other camera whose frame is waiting, each in turn. 1 if there was one. */
+static int flow_other(struct fsr_worker *w)
+{
+    const int ncams = __atomic_load_n(&w->ncams, __ATOMIC_ACQUIRE);
+    for (int i = 0; i < ncams; i++) {
+        const int k = (w->next + i) % ncams;
+        struct flow_slot *s = &w->slots[k];
+        if (k == w->fsr_cam || !s->t)
+            continue;
+        const uint32_t job = __atomic_load_n(&s->want, __ATOMIC_ACQUIRE);
+        if (job == s->seen)
+            continue;
+        s->seen = job;
+        tk_generate_make(s->t);
+        __atomic_store_n(&s->done, job, __ATOMIC_RELEASE);
+        w->next = (k + 1) % ncams;
+        return 1;
+    }
+    return 0;
+}
+
+/* Between FSR's stages, a limited number: a camera at 33 ms a frame need not wait for a whole frame of FSR, and FSR's camera must not wait for all of theirs. With no limit, 2026-11-04, the team asked for 105 % of its time and FSR's camera lost: 15.83 pictures a second, L and R 59.3. */
+#define FLOW_INSIDE_FSR 2
+static void flow_between(void *arg)
 {
     struct fsr_worker *w = arg;
-    const int ncams = __atomic_load_n(&w->ncams, __ATOMIC_ACQUIRE);
-    for (int k = 0; k < ncams; k++) {
-        struct cam_job *c = &w->cams[k];
-        const uint32_t job = __atomic_load_n(&c->want, __ATOMIC_ACQUIRE);
-        if (job == c->seen)
-            continue;
-        c->seen = job;
-        ld_vectors(w->ld, k, c->cur, w->team);
-        ld_update(w->ld, k, c->cur, w->team);
-        __atomic_store_n(&c->done, job, __ATOMIC_RELEASE);
-    }
+    if (w->inside_left > 0)
+        w->inside_left -= flow_other(w);
 }
 
 static void *fsr_worker_main(void *arg)
@@ -326,21 +334,20 @@ static void *fsr_worker_main(void *arg)
     __atomic_store_n(&w->team_ok, w->team ? 1 : -1, __ATOMIC_RELEASE);
     if (!w->team)
         return NULL;
-    uint32_t seen = 0;
     while (!__atomic_load_n(&w->stop, __ATOMIC_ACQUIRE)) {
-        fsr_worker_cams(w);
-        const uint32_t job = __atomic_load_n(&w->want, __ATOMIC_ACQUIRE);
-        if (job == seen) {
-            team_delay(2000);
+        struct flow_slot *d = &w->slots[w->fsr_cam];
+        const uint32_t job = __atomic_load_n(&d->want, __ATOMIC_ACQUIRE);
+        if (job != d->seen) {
+            d->seen = job;
+            /* FSR's camera first: the field its motion comes from, FSR on the real frame, and the frame between it and the last from their pictures. They go together. */
+            w->inside_left = FLOW_INSIDE_FSR;
+            tk_generate_make(d->t);
+            w->with_mid = tk_fsr_one(d->t);
+            __atomic_store_n(&d->done, job, __ATOMIC_RELEASE);
             continue;
         }
-        seen = job;
-        /* The generated frame, then the real one: each picture may go as soon as it exists. L and R between them. */
-        tk_fsr_one(w->t, 0);
-        __atomic_store_n(&w->ready_mid, job, __ATOMIC_RELEASE);
-        fsr_worker_cams(w);
-        tk_fsr_one(w->t, 1);
-        __atomic_store_n(&w->ready, job, __ATOMIC_RELEASE);
+        if (!flow_other(w))
+            team_delay(2000);
     }
     team_destroy(w->team);
     return NULL;
@@ -490,18 +497,33 @@ static uint64_t vec_publish(struct vt_dma *dma, const struct arena *a, const str
     return vt_dma_copy(dma, meta_phys, host_meta, sizeof *meta, host_pub, seq + 1);
 }
 
-/* A finished picture and what it was, on the channel: the word that names it last. */
-static uint64_t fsr_publish(struct vt_dma *dma, const struct arena *a, uint8_t *pic, int mid, const struct vt_config *cfg, struct vt_fsr_meta *meta, uint64_t meta_phys, uint64_t host_meta, uint64_t host_pub, uint64_t seq, uint64_t instance)
+/* A real frame's finished picture, and the one half way to it if there is one, on the channel: the word that names them last. One meta for both: they finish together, and a second word so soon would pass the first unread. */
+static uint64_t fsr_publish(struct vt_dma *dma, const struct arena *a, uint8_t *const *pics, int with_mid, const struct vt_config *cfg, struct vt_fsr_meta *meta, uint64_t meta_phys, uint64_t host_meta, uint64_t host_pub, uint64_t seq, uint64_t instance)
 {
-    const uint32_t slot = (uint32_t)(seq % VT_FSR_SLOTS);
-    if (!copy_range(dma, a, pic, dma->region_addr + VT_PART_OFFSET + vt_fsr_offset(slot), (uint64_t)cfg->fsr_w * cfg->fsr_h, 0))
+    const uint32_t mid = (uint32_t)(2u * seq % VT_FSR_SLOTS), slot = mid + 1u;
+    const uint64_t bytes = (uint64_t)cfg->fsr_w * cfg->fsr_h;
+    if ((with_mid && !copy_range(dma, a, pics[0], dma->region_addr + VT_PART_OFFSET + vt_fsr_offset(mid), bytes, 0)) || !copy_range(dma, a, pics[1], dma->region_addr + VT_PART_OFFSET + vt_fsr_offset(slot), bytes, 0))
         return 0;
     meta->instance = instance;
-    meta->slot = mid ? VT_FSR_SLOTS : slot;
-    meta->slot_mid = mid ? slot : VT_FSR_SLOTS;
+    meta->slot = slot;
+    meta->slot_mid = with_mid ? mid : VT_FSR_SLOTS;
     meta->w = cfg->fsr_w;
     meta->h = cfg->fsr_h;
     return vt_dma_copy(dma, meta_phys, host_meta, sizeof *meta, host_pub, seq + 1);
+}
+
+/* A generated picture of a camera that does not go through FSR, on the channel: the word that names it last. Its row went ahead, as soon as the tracker had the newer frame. */
+static uint64_t gen_publish(struct vt_dma *dma, const struct arena *a, uint8_t *pic, uint64_t bytes, uint32_t cam, uint32_t *turn, uint64_t cycles, struct vt_gen_meta *meta, uint64_t meta_phys, uint64_t seq, uint64_t instance)
+{
+    const uint64_t part = dma->region_addr + VT_PART_OFFSET;
+    const uint32_t slot = (*turn)++ % VT_GEN_SLOTS;
+    if (!copy_range(dma, a, pic, part + vt_gen_offset(cam, slot), bytes, 0))
+        return 0;
+    memset(meta, 0, sizeof *meta);
+    meta->instance = instance;
+    meta->slot = slot;
+    meta->cycles_make = cycles;
+    return vt_dma_copy(dma, meta_phys, part + offsetof(struct vt_ctl, gen_meta) + (uint64_t)cam * sizeof(struct vt_gen_meta), sizeof *meta, part + offsetof(struct vt_ctl, gen_pub) + (uint64_t)cam * sizeof(uint64_t), seq + 1);
 }
 
 static int fsr_camera_w(const struct vt_config *c) { return (int)(c->fsr_camera == 2 ? c->width2 : c->fsr_camera == 3 ? c->width3 : c->width); }
@@ -539,7 +561,9 @@ int session_track(struct vt_ctl *ctl, struct vt_dma *dma, const struct topo *top
     const size_t plane2 = cfg->dual ? plane_bytes((int)cfg->width2, (int)cfg->height2) : 0;
     const size_t plane3 = cfg->dual && cfg->width3 ? plane_bytes((int)cfg->width3, (int)cfg->height3) : 0;
     const int with_depth = cfg->dual && cfg->width3 && cfg->depth_planes;
-    const size_t need = (cfg->vec_overlay && cfg->fsr_up_w ? vd_bytes((int)cfg->fsr_up_w, (int)cfg->fsr_up_h, VT_DEPTH_BYTES / (int)sizeof(struct vt_cell)) + (size_t)cfg->fsr_w * cfg->fsr_h + (1u << 20) : 0u) + (cfg->fsr_camera ? (cfg->fsr_up_w ? fsr_bytes(fsr_camera_w(cfg), fsr_camera_h(cfg), (int)cfg->fsr_up_w, (int)cfg->fsr_up_h, (int)cfg->fsr_w, (int)cfg->fsr_h) : fsr_bytes(fsr_camera_w(cfg), fsr_camera_h(cfg), (int)cfg->fsr_w, (int)cfg->fsr_h, 0, 0)) + 2u * (size_t)cfg->fsr_w * cfg->fsr_h + (2u << 20) : 0u) + (two ? 26 : 20) * plane + 20 * plane2 + 20 * plane3 + DEV_SLOTS * slot_bytes + (cfg->dual ? (128u << 20) : (64u << 20)) + (with_depth ? ld_bytes(cfg, n) : 0) + (cfg->gen_pictures ? 3 * VT_GEN_PIC_BYTES : 0);
+    /* The orange vectors are drawn at the size FSR's picture has before any second stage. */
+    const int vd_w = (int)(cfg->fsr_up_w ? cfg->fsr_up_w : cfg->fsr_w), vd_h = (int)(cfg->fsr_up_w ? cfg->fsr_up_h : cfg->fsr_h);
+    const size_t need = (cfg->vec_overlay && vd_w ? vd_bytes(vd_w, vd_h, VT_DEPTH_BYTES / (int)sizeof(struct vt_cell)) + (size_t)cfg->fsr_w * cfg->fsr_h + (1u << 20) : 0u) + (cfg->fsr_camera ? (cfg->fsr_up_w ? fsr_bytes(fsr_camera_w(cfg), fsr_camera_h(cfg), (int)cfg->fsr_up_w, (int)cfg->fsr_up_h, (int)cfg->fsr_w, (int)cfg->fsr_h) : fsr_bytes(fsr_camera_w(cfg), fsr_camera_h(cfg), (int)cfg->fsr_w, (int)cfg->fsr_h, 0, 0)) + 2u * (size_t)cfg->fsr_w * cfg->fsr_h + (2u << 20) : 0u) + (two ? 26 : 20) * plane + 20 * plane2 + 20 * plane3 + DEV_SLOTS * slot_bytes + (cfg->dual ? (128u << 20) : (64u << 20)) + (with_depth ? ld_bytes(cfg, n) : 0) + (cfg->gen_pictures ? 3 * VT_GEN_PIC_BYTES : 0);
     struct arena a;
     if (arena_open(&a, need))
         return -1;
@@ -641,11 +665,8 @@ int session_track(struct vt_ctl *ctl, struct vt_dma *dma, const struct topo *top
     static struct fsr_worker fsr_w;
     memset(&fsr_w, 0, sizeof fsr_w);
     pthread_t fsr_th;
-    uint32_t fsr_ready_seen = 0, fsr_mid_seen = 0;
-    int fsr_pending = 0, fsr_skipped = 0;
-    uint64_t fsr_pending_instance = 0;
+
     uint64_t fsr_seq = 0;
-    uint64_t fsr_job_instance = 0;
     if (cfg->fsr_camera) {
         struct tracker *ft = fsr_cam <= 0 ? tr : trk[fsr_cam];
         fsr_pics[0] = arena_take(&a, (uint64_t)cfg->fsr_w * cfg->fsr_h, 64);
@@ -665,7 +686,7 @@ int session_track(struct vt_ctl *ctl, struct vt_dma *dma, const struct topo *top
                 taken++;
             }
             fsr_w.n = nw;
-            fsr_w.t = ft;
+            fsr_w.fsr_cam = fsr_cam;
             if (!nw || pthread_create(&fsr_th, NULL, fsr_worker_main, &fsr_w)) {
                 fprintf(stderr, "vtrackd: no threads left for FSR\n");
                 return -1;
@@ -682,19 +703,42 @@ int session_track(struct vt_ctl *ctl, struct vt_dma *dma, const struct topo *top
             return -1;
         }
     }
-    /* L and R's vectors on FSR's team, between its frames: the frames never wait for them, nor they for a gap in the frames. Their own way to the window. */
+    /* Every camera's flow on that team, the operator's order, 2026-11-04. The session's team keeps the rest. */
+    const int flow_on = cfg->fsr_async && cfg->fsr_camera;
+    struct vt_gen_meta *gen_meta[VT_MAX_CAMERAS] = {NULL, NULL, NULL};
+    uint64_t gen_meta_phys[VT_MAX_CAMERAS] = {0, 0, 0}, gen_dma[VT_MAX_CAMERAS] = {0, 0, 0}, gen_seq[VT_MAX_CAMERAS] = {0, 0, 0};
+    uint32_t flow_seen[VT_MAX_CAMERAS] = {0, 0, 0};
+    int flow_pending[VT_MAX_CAMERAS] = {0, 0, 0}, flow_skipped[VT_MAX_CAMERAS] = {0, 0, 0};
+    uint64_t flow_instance[VT_MAX_CAMERAS] = {0, 0, 0}, flow_pending_instance[VT_MAX_CAMERAS] = {0, 0, 0};
+    uint64_t flow_waits = 0, flow_replaced = 0;
+    if (flow_on) {
+        for (uint32_t k = 0; k < vt_cameras(cfg); k++) {
+            if (!gen_pic[k])
+                continue;
+            if (tk_flow_apart(trk[k], arena_alloc, &a, fsr_worker_run, &fsr_w)) {
+                fprintf(stderr, "vtrackd: no room for camera %u's flow on the second team\n", k);
+                return -1;
+            }
+            gen_meta[k] = arena_take(&a, sizeof(struct vt_gen_meta), 64);
+            if (!gen_meta[k])
+                return -1;
+            gen_meta_phys[k] = arena_phys(&a, gen_meta[k]);
+            fsr_w.slots[k].t = trk[k];
+        }
+        tk_fsr_between(trk[fsr_cam], flow_between, &fsr_w);
+        __atomic_store_n(&fsr_w.ncams, (int)vt_cameras(cfg), __ATOMIC_RELEASE);
+    }
+    /* L and R's vectors on this session's team, at half their rate, each the moment nothing is waiting: the frames never wait for them. Their own way to the window, so a map can no longer hold them up. */
     int cams_on = 0, att_wanted[VT_CELL_CAMERAS] = {0, 0};
-    uint32_t cam_seen[VT_CELL_CAMERAS] = {0, 0}, cam_tick[VT_CELL_CAMERAS] = {0, 0};
+    uint32_t cam_tick[VT_CELL_CAMERAS] = {0, 0};
     uint64_t cam_seq[VT_CELL_CAMERAS] = {0, 0}, cam_dma[VT_CELL_CAMERAS] = {0, 0}, cells_meta_phys[VT_CELL_CAMERAS] = {0, 0};
     struct vt_cells_meta *cells_meta[VT_CELL_CAMERAS] = {NULL, NULL};
-    if (cfg->vec_overlay && cfg->fsr_async && ld && fsr_cam == 2 && fsr_w.n <= n && ld_cell_bytes(ld, 0) <= VT_CELL_SLOT_BYTES && ld_cell_bytes(ld, 1) <= VT_CELL_SLOT_BYTES) {
+    if (cfg->vec_overlay && cfg->fsr_async && ld && fsr_cam == 2 && ld_cell_bytes(ld, 0) <= VT_CELL_SLOT_BYTES && ld_cell_bytes(ld, 1) <= VT_CELL_SLOT_BYTES) {
         cells_meta[0] = arena_take(&a, 64, 64);
         cells_meta[1] = arena_take(&a, 64, 64);
         if (cells_meta[0] && cells_meta[1]) {
             cells_meta_phys[0] = arena_phys(&a, cells_meta[0]);
             cells_meta_phys[1] = arena_phys(&a, cells_meta[1]);
-            fsr_w.ld = ld;
-            __atomic_store_n(&fsr_w.ncams, VT_CELL_CAMERAS, __ATOMIC_RELEASE);
             cams_on = 1;
         }
     }
@@ -712,7 +756,7 @@ int session_track(struct vt_ctl *ctl, struct vt_dma *dma, const struct topo *top
     memset(&vec_msg, 0, sizeof vec_msg);
     struct vt_vec_meta *vec_meta = NULL;
     uint64_t vec_meta_phys = 0;
-    if (cfg->vec_overlay && cfg->fsr_async && cfg->fsr_up_w && ld && fsr_cam >= 0 && (uint64_t)cfg->fsr_w * cfg->fsr_h <= VT_VEC_PIC_BYTES) {
+    if (cfg->vec_overlay && cfg->fsr_async && ld && fsr_cam >= 0 && (uint64_t)cfg->fsr_w * cfg->fsr_h <= VT_VEC_PIC_BYTES) {
         int nv = 0;
         for (int c = 0; c < topo->ncores && !nv; c++) {
             const struct topo_core *k = &topo->core[c];
@@ -729,22 +773,22 @@ int session_track(struct vt_ctl *ctl, struct vt_dma *dma, const struct topo *top
                 nv++;
             }
         }
-        const size_t draw_bytes = vd_bytes((int)cfg->fsr_up_w, (int)cfg->fsr_up_h, VT_DEPTH_BYTES / (int)sizeof(struct vt_cell));
+        const size_t draw_bytes = vd_bytes(vd_w, vd_h, VT_DEPTH_BYTES / (int)sizeof(struct vt_cell));
         void *draw_mem = nv ? arena_take(&a, draw_bytes, 64) : NULL;
         vec_w.fsr = tk_fsr_of(fsr_cam <= 0 ? tr : trk[fsr_cam]);
         vec_w.temp_each = vec_w.fsr ? (fsr_down_temp_bytes(vec_w.fsr) + 63u) & ~(size_t)63u : 0u;
-        vec_w.temp = nv ? arena_take(&a, (uint64_t)nv * vec_w.temp_each, 64) : NULL;
+        vec_w.temp = nv ? arena_take(&a, (uint64_t)nv * vec_w.temp_each + 64u, 64) : NULL;
         vec_w.pic = nv ? arena_take(&a, (uint64_t)cfg->fsr_w * cfg->fsr_h, 64) : NULL;
         vec_meta = nv ? arena_take(&a, sizeof(struct vt_vec_meta), 64) : NULL;
         if (!draw_mem || !vec_w.fsr || !vec_w.temp || !vec_w.pic || !vec_meta) {
             fprintf(stderr, "vtrackd: no spare core or no room for the orange vectors: the window draws them as before\n");
         } else {
             vec_meta_phys = arena_phys(&a, vec_meta);
-            vec_w.draw = vd_init(draw_mem, (int)cfg->fsr_up_w, (int)cfg->fsr_up_h, VT_DEPTH_BYTES / (int)sizeof(struct vt_cell));
+            vec_w.draw = vd_init(draw_mem, vd_w, vd_h, VT_DEPTH_BYTES / (int)sizeof(struct vt_cell));
             vec_w.ld = ld;
             vec_w.cam = fsr_cam;
             vec_w.level = ld_flow_level(ld);
-            vec_w.view = (long double)cfg->fsr_up_w / (long double)fsr_camera_w(cfg);
+            vec_w.view = (long double)vd_w / (long double)fsr_camera_w(cfg);
             vec_w.n = nv;
             {
                 int gc, gr;
@@ -808,78 +852,44 @@ int session_track(struct vt_ctl *ctl, struct vt_dma *dma, const struct topo *top
     uint64_t depth_cycles = 0;
     uint64_t npub = 0; /* results sent: one per frame taken, and one per frame generated */
     for (;;) {
-        /* What FSR has finished, whenever it finishes: the generated frame's picture, then the real one's. */
-        if (cfg->fsr_async) {
-            int fsr_failed = 0;
-            for (int which = 0; which < 2 && !fsr_failed; which++) {
-                const uint32_t r = __atomic_load_n(which ? &fsr_w.ready : &fsr_w.ready_mid, __ATOMIC_ACQUIRE);
-                uint32_t *was = which ? &fsr_ready_seen : &fsr_mid_seen;
-                if (r == *was)
+        /* What the second team has finished, whenever it finishes, and what has waited for it. FSR's camera: the picture half way and the real one, together. The others: the picture made between two real frames, whose row has gone ahead. */
+        if (flow_on) {
+            int flow_failed = 0;
+            for (uint32_t k = 0; k < vt_cameras(cfg) && !flow_failed; k++) {
+                if (!fsr_w.slots[k].t)
                     continue;
-                /* The meta and its picture are read by the channel: the last copy goes first. */
-                if (last_dma && vt_dma_wait(dma, last_dma, 5.0)) {
-                    fsr_failed = 1;
-                    break;
-                }
-                const uint64_t dma_done = fsr_publish(dma, &a, fsr_pics[which], !which, cfg, fsr_meta, fsr_meta_phys, dma->region_addr + VT_PART_OFFSET + offsetof(struct vt_ctl, fsr_meta), dma->region_addr + VT_PART_OFFSET + offsetof(struct vt_ctl, fsr_pub), fsr_seq, fsr_job_instance);
-                if (!dma_done) {
-                    fsr_failed = 1;
-                    break;
-                }
-                last_dma = dma_done;
-                fsr_seq++;
-                *was = r;
-            }
-            if (fsr_failed) {
-                fprintf(stderr, "vtrackd: FSR picture copy refused or timed out\n");
-                rc = -1;
-                break;
-            }
-            /* The newest real frame that came while it was busy goes the moment it is free: a little late costs a little, not a whole frame. */
-            if (fsr_pending && fsr_ready_seen == fsr_w.want) {
-                fsr_pending = 0;
-                tk_fsr_take(fsr_cam <= 0 ? tr : trk[fsr_cam], fsr_skipped);
-                fsr_skipped = 0;
-                fsr_job_instance = fsr_pending_instance;
-                __atomic_store_n(&fsr_w.want, fsr_w.want + 1u, __ATOMIC_RELEASE);
-                fsr_w.frames++;
-            }
-        }
-        /* L and R's vectors the same way, on FSR's team. */
-        if (cams_on) {
-            int cam_failed = 0;
-            for (int k = 0; k < VT_CELL_CAMERAS; k++) {
-                struct cam_job *cj = &fsr_w.cams[k];
-                const uint32_t r = __atomic_load_n(&cj->done, __ATOMIC_ACQUIRE);
-                if (r != cam_seen[k]) {
-                    cam_seen[k] = r;
-                    if (cam_dma[k] && vt_dma_wait(dma, cam_dma[k], 5.0)) {
-                        cam_failed = 1;
-                        break;
+                struct flow_slot *s = &fsr_w.slots[k];
+                const uint32_t r = __atomic_load_n(&s->done, __ATOMIC_ACQUIRE);
+                if (r != flow_seen[k]) {
+                    if ((int)k == fsr_cam) {
+                        /* The meta and its pictures are read by the channel: the last copy goes first. */
+                        flow_failed = last_dma && vt_dma_wait(dma, last_dma, 5.0);
+                        const uint64_t sent = flow_failed ? 0 : fsr_publish(dma, &a, fsr_pics, fsr_w.with_mid, cfg, fsr_meta, fsr_meta_phys, dma->region_addr + VT_PART_OFFSET + offsetof(struct vt_ctl, fsr_meta), dma->region_addr + VT_PART_OFFSET + offsetof(struct vt_ctl, fsr_pub), fsr_seq, flow_instance[k]);
+                        flow_failed = !sent;
+                        last_dma = sent ? sent : last_dma;
+                        fsr_seq++;
+                    } else {
+                        flow_failed = gen_dma[k] && vt_dma_wait(dma, gen_dma[k], 5.0);
+                        gen_dma[k] = flow_failed ? 0 : gen_publish(dma, &a, gen_pic[k], gen_bytes[k], k, &gen_turn[k], tk_flow_cycles(trk[k]), gen_meta[k], gen_meta_phys[k], gen_seq[k], flow_instance[k]);
+                        flow_failed = !gen_dma[k];
+                        last_dma = gen_dma[k] ? gen_dma[k] : last_dma;
+                        gen_seq[k]++;
                     }
-                    cam_dma[k] = cells_publish(dma, &a, ld, k, cj->instance, cells_meta[k], cells_meta_phys[k], cam_seq[k]);
-                    if (!cam_dma[k]) {
-                        cam_failed = 1;
-                        break;
-                    }
-                    last_dma = cam_dma[k];
-                    cam_seq[k]++;
-                    att_wanted[k] = 1;
+                    flow_seen[k] = r;
                 }
-                if (flow_job[k].wanted && __atomic_load_n(&cj->want, __ATOMIC_ACQUIRE) == cam_seen[k]) {
-                    /* What it fills must have gone before it is filled again. */
-                    if (cam_dma[k] && vt_dma_wait(dma, cam_dma[k], 5.0)) {
-                        cam_failed = 1;
-                        break;
-                    }
-                    flow_job[k].wanted = 0;
-                    cj->instance = flow_job[k].msg.instance;
-                    cj->cur = tk_level(flow_job[k].t, flow_job[k].set, ld_flow_level(ld));
-                    __atomic_store_n(&cj->want, cj->want + 1u, __ATOMIC_RELEASE);
+                /* The newest real frame that came while it was busy goes the moment it is free: a little late costs a little, not a whole frame. What it writes must have gone first. */
+                if (!flow_failed && flow_pending[k] && flow_seen[k] == s->want) {
+                    flow_failed = gen_dma[k] && vt_dma_wait(dma, gen_dma[k], 5.0);
+                    flow_pending[k] = 0;
+                    tk_flow_take(trk[k], flow_skipped[k]);
+                    flow_skipped[k] = 0;
+                    flow_instance[k] = flow_pending_instance[k];
+                    __atomic_store_n(&s->want, s->want + 1u, __ATOMIC_RELEASE);
+                    fsr_w.frames += (int)k == fsr_cam;
                 }
             }
-            if (cam_failed) {
-                fprintf(stderr, "vtrackd: copy of L or R's vectors refused or timed out\n");
+            if (flow_failed) {
+                fprintf(stderr, "vtrackd: a picture copy refused or timed out\n");
                 rc = -1;
                 break;
             }
@@ -935,6 +945,32 @@ int session_track(struct vt_ctl *ctl, struct vt_dma *dma, const struct topo *top
         if ((cfg->dual ? __atomic_load_n(&g.landed, __ATOMIC_ACQUIRE) : __atomic_load_n(&f.built, __ATOMIC_ACQUIRE)) <= nres) {
             /* No frame waiting: one piece of what is below tracking, then look again. */
             if (ld) {
+                /* L and R's vectors first of all that waits for a gap. Their own copy to the window. */
+                if (cams_on && (flow_job[0].wanted || flow_job[1].wanted)) {
+                    const int ck = flow_job[0].wanted ? 0 : 1;
+                    const uint64_t t3 = vt_tsc();
+                    flow_job[ck].wanted = 0;
+                    /* What it fills must have gone before it is filled again. */
+                    if (cam_dma[ck] && vt_dma_wait(dma, cam_dma[ck], 5.0)) {
+                        fprintf(stderr, "vtrackd: copy of L or R's vectors timed out\n");
+                        rc = -1;
+                        break;
+                    }
+                    const struct vt_plane *cc = tk_level(flow_job[ck].t, flow_job[ck].set, ld_flow_level(ld));
+                    ld_vectors(ld, ck, cc, tm);
+                    ld_update(ld, ck, cc, tm);
+                    cam_dma[ck] = cells_publish(dma, &a, ld, ck, flow_job[ck].msg.instance, cells_meta[ck], cells_meta_phys[ck], cam_seq[ck]);
+                    if (!cam_dma[ck]) {
+                        fprintf(stderr, "vtrackd: copy of L or R's vectors refused\n");
+                        rc = -1;
+                        break;
+                    }
+                    last_dma = cam_dma[ck];
+                    cam_seq[ck]++;
+                    att_wanted[ck] = 1;
+                    depth_cycles += vt_tsc() - t3;
+                    continue;
+                }
                 /* What the spare core has finished: the session's part of that frame, then a map can read it. */
                 if (vec_rest) {
                     const uint64_t t3 = vt_tsc();
@@ -1015,25 +1051,42 @@ int session_track(struct vt_ctl *ctl, struct vt_dma *dma, const struct topo *top
             const int cam = (int)m->camera;
             cur = trk[cam];
             set = (int)(cam_frames[cam]++ % (uint64_t)tk_sets(cur));
+            const int apart = flow_on && fsr_w.slots[cam].t != NULL;
+            /* A set the second team is still reading must not be built over. It has two frames' time: that it should ever wait here is worth counting. */
+            if (apart) {
+                int waited = 0;
+                while (__atomic_load_n(&fsr_w.slots[cam].done, __ATOMIC_ACQUIRE) != fsr_w.slots[cam].want && tk_flow_reads(cur, set)) {
+                    waited = 1;
+                    vt_delay(IDLE_POLL_CYCLES);
+                }
+                flow_waits += (uint64_t)waited;
+            }
             const uint64_t t0 = vt_tsc();
             tk_build(cur, set, g.dev[di], NULL, m);
             const uint64_t t1 = vt_tsc();
             struct vt_msg gm;
-            const int gen_set = tk_generate(cur, set, m, &gm);
+            const int gen_set = apart ? tk_generate_plan(cur, set, m, &gm) : tk_generate(cur, set, m, &gm);
             const uint64_t t_gen = vt_tsc();
-            if (gen_set >= 0 && fsr_cam == cam && cfg->fsr_async) {
+            if (gen_set >= 0 && apart) {
                 /* Free only once the last job's pictures have gone. If not, the newest waits; the one it replaces is the one let go. */
-                if (fsr_ready_seen == fsr_w.want) {
-                    tk_fsr_take(cur, fsr_skipped);
-                    fsr_skipped = 0;
-                    fsr_job_instance = m->instance;
-                    __atomic_store_n(&fsr_w.want, fsr_w.want + 1u, __ATOMIC_RELEASE);
-                    fsr_w.frames++;
+                struct flow_slot *fs = &fsr_w.slots[cam];
+                if (flow_seen[cam] == fs->want) {
+                    if (gen_dma[cam] && vt_dma_wait(dma, gen_dma[cam], 5.0)) {
+                        fprintf(stderr, "vtrackd: generated picture DMA timed out\n");
+                        rc = -1;
+                        break;
+                    }
+                    tk_flow_take(cur, flow_skipped[cam]);
+                    flow_skipped[cam] = 0;
+                    flow_instance[cam] = m->instance;
+                    __atomic_store_n(&fs->want, fs->want + 1u, __ATOMIC_RELEASE);
+                    fsr_w.frames += cam == fsr_cam;
                 } else {
-                    fsr_w.dropped += fsr_pending;
-                    fsr_skipped += fsr_pending;
-                    fsr_pending = 1;
-                    fsr_pending_instance = m->instance;
+                    fsr_w.dropped += cam == fsr_cam ? flow_pending[cam] : 0;
+                    flow_replaced += (uint64_t)flow_pending[cam];
+                    flow_skipped[cam] += flow_pending[cam];
+                    flow_pending[cam] = 1;
+                    flow_pending_instance[cam] = m->instance;
                 }
             } else if (gen_set >= 0 && fsr_cam == cam)
                 tk_fsr_frame(cur);
@@ -1047,7 +1100,7 @@ int session_track(struct vt_ctl *ctl, struct vt_dma *dma, const struct topo *top
                 rig_waiting = 0;
             }
             tk_track(cur, set, m, res);
-            if (gen_set >= 0 && send_generated(cur, &gm, t_gen - t1, res, gres, gres_phys, dma, &a, fsr_cam == cam && cfg->fsr_async ? NULL : gen_pic[cam], gen_bytes[cam], &gen_turn[cam], fsr_cam == cam && !cfg->fsr_async ? fsr_pics[0] : NULL, cfg, &fsr_turn, &npub, &last_dma, host_res, pub_addr)) {
+            if (gen_set >= 0 && send_generated(cur, &gm, t_gen - t1, res, gres, gres_phys, dma, &a, apart ? NULL : gen_pic[cam], gen_bytes[cam], &gen_turn[cam], fsr_cam == cam && !cfg->fsr_async ? fsr_pics[0] : NULL, cfg, &fsr_turn, &npub, &last_dma, host_res, pub_addr)) {
                 rc = -1;
                 break;
             }
@@ -1154,7 +1207,7 @@ int session_track(struct vt_ctl *ctl, struct vt_dma *dma, const struct topo *top
     if (cfg->fsr_async && cfg->fsr_camera) {
         __atomic_store_n(&fsr_w.stop, 1, __ATOMIC_RELEASE);
         pthread_join(fsr_th, NULL);
-        printf("vtrackd: FSR took %d real frames of camera %u, let %d go (card)\n", fsr_w.frames, cfg->fsr_camera - 1u, fsr_w.dropped);
+        printf("vtrackd: FSR took %d real frames of camera %u, let %d go; flow let %llu go in all, and the tracker waited for it %llu times (card)\n", fsr_w.frames, cfg->fsr_camera - 1u, fsr_w.dropped, (unsigned long long)flow_replaced, (unsigned long long)flow_waits);
     }
     if (vec_on) {
         __atomic_store_n(&vec_w.stop, 1, __ATOMIC_RELEASE);

@@ -13,10 +13,10 @@ Built on [Intel-Phi-7120A](https://github.com/Lasimeri/Intel-Phi-7120A) and [Int
 | --- | --- | --- |
 | M0 audit, topology, native execution | **done, on the card** | [compatibility](docs/compatibility.md) |
 | M1 SIMD numerical primitives | **done, on the card** | [measurements](docs/measurements.md) |
-| M2 optical-flow tracking | **kernel and tracking run on the card**: the first tracker's median on a virtual gimbal, so the window travels with the target on fixed cameras, and only what lies in the operator's box counts; L and R at native 30, D at 15 doubled to 30 by generated frames the tracker never reads (29.97, 30.00 and 30.01 pictures a second over 10,798 s, capture to screen 40, 46 and 136 ms at the median); a lost region searched for over the whole picture until the operator ends it. On known truth in scenes, and "seems good" by the operator's own live tests, with no number. **D falls to 28.42 a second with 300 to 599 of its own cells moving and 24.58 with 600 or more; D's virtual gimbal reference missed what looks like a real move; `scripts/check.sh` has not run since 16:13, 69 passed and 6 failed** ([limitations](docs/limitations.md)) | [measurements](docs/measurements.md) |
+| M2 optical-flow tracking | **kernel and tracking run on the card**: the first tracker's median on a virtual gimbal, so the window travels with the target on fixed cameras, and only what lies in the operator's box counts; L and R at 30 doubled to 60, D at 15 up by FSR to 1080p and doubled to 30, by generated frames the tracker never reads, all flow and FSR on a second team of 118 threads (59.78, 59.82 and 29.98 pictures a second over 259 s, D 30.00 with 600 or more of its own cells moving over 12 s of that; capture to screen 77, 77 and 158 ms at the median); a lost region searched for over the whole picture until the operator ends it. On known truth in scenes, and "seems good" by the operator's own live tests, with no number. **The second team runs at about 91 % of its time, and a longer run under motion is owed; `scripts/check.sh` has not run since 16:13, 69 passed and 6 failed** ([limitations](docs/limitations.md)) | [measurements](docs/measurements.md) |
 | M3 stereo reconstruction | **runs on the card, 1 to 2 mm RMSE on synthetic scenes**; ambiguity reported, gate fires | [measurements](docs/measurements.md) |
 | M4 temporal state estimation | **runs on the card**; covariance not calibrated | [measurements](docs/measurements.md) |
-| M5 live visualization, integration | **three cameras and a depth map live on the card** (L + R 1080p30; D 720p15, through flow and FSR to 1080p30; 15.02 maps/s at 14.38 ms, 10.09 % of textured pixels confident); LED star tracker live; the card's vectors gate the depth map's averaging; tracking first, with flow and the map in the card's idle moments; optical flow at half native (4,080 cells for L and R; native, 16,200, also holds); each camera's turn measured constantly on the card from its own picture, with no lock, carrying the geometry; **the map is not yet right: L and R mostly do not agree through D except on one near object; no measured ground truth; real moves seen live with no truth for them: R's turn read and carried, D's not found** | [measurements](docs/measurements.md) |
+| M5 live visualization, integration | **three cameras and a depth map live on the card** (L + R 1080p30, shown at 60; D 720p15, through FSR to 1080p15, shown at 30; 15.01 maps/s; 14.38 ms and 10.09 % of textured pixels confident on the chain before); LED star tracker live; the card's vectors gate the depth map's averaging; tracking first, with flow and the map in the card's idle moments; optical flow at half native (4,080 cells for L and R; native, 16,200, also holds); each camera's turn measured constantly on the card from its own picture, with no lock, carrying the geometry; **the map is not yet right: L and R mostly do not agree through D except on one near object; no measured ground truth; a change of light can lose a camera's own turn check until the next session; R's carried turns are unverified** | [measurements](docs/measurements.md) |
 | M6 optimization, validation | partial | [limitations](docs/limitations.md) |
 
 Open items: [limitations](docs/limitations.md). Design: [architecture](docs/architecture.md).
@@ -50,9 +50,9 @@ Its options, each passed on to `vt_view`:
 | Option | Default | What it sets |
 | --- | --- | --- |
 | `--rate`, `--rate2`, `--rate3` | 30, 30, 15 | frames a second kept of L, R and D |
-| `--framegen 0\|1` | 1 | D's generated frames: 15 to 30 a second |
-| `--lr-gen 0\|1` | 0 | the same for L and R, to 60 a second |
-| `--fsr 0\|1` | 1 | D through FSR to 1440p, then Lanczos to 1080p |
+| `--framegen 0\|1` | 1 | generated frames: D 15 to 30 a second |
+| `--lr-gen 0\|1` | 1 | the same for L and R, 30 to 60 a second |
+| `--fsr 0\|1` | 1 | D through FSR straight to 1080p, with its doubling from the finished pictures |
 | `--vec 0\|1` | 1 | the orange vectors |
 | `--ref 0\|1` | 1 | L and R choosing their own static regions |
 | `--gimbal-ref 0\|1` | 1 | D's own reference may shift its stopped head |
@@ -82,7 +82,7 @@ out/host/vt_attitude --transfer CALIB OLD NEW POINTS OUT TILT PAN [ROLL [FLOOR]]
 out/host/vt_attitude --solve-r CALIB OLD_POINTS NEW_POINTS OUT               # R's turn from them; L, D and the lenses held
 out/host/vt_agree CALIB PREFIX [--planes N] [--agg R] [--grid 1] [--dump OUT]  # do R and L, each referred to D, arrive at the same depth? The honest judge of the map
 echo 'flow 0' > out/run/view.cmd                                             # optical flow at pyramid level 0 (native), 1 or 2: a new session on the card
-echo 'framegen 0' > out/run/view.cmd                                         # D's generated frames, shown in the window, on by default (--framegen 0 at start): a new session on the card
+echo 'framegen 0' > out/run/view.cmd                                         # generated frames, shown in the window, on by default (--framegen 0 at start): a new session on the card
 ```
 
 The depth map runs by itself in the live window once `current.txt` holds all three cameras. To look at it closely, from the desktop host:

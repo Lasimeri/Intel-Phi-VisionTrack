@@ -33,16 +33,25 @@ int tk_rig_moved(struct tracker *t, long double du, long double dv);
 /* After tk_build of a real frame into `set` and before its tk_track: makes the picture half way between it and the last real one, written to what tk_set_picture named, and fills *gm with its message. Returns the set its
  * plane lives in, or -1 if there is none. A generated picture is for the eye and nothing else reads it: the tracker follows real frames only, so a real row is the same with generation on or off, to the bit. */
 int tk_generate(struct tracker *t, int set, const struct vt_msg *m, struct vt_msg *gm);
+/* The same in parts, to run apart from the tracker. tk_generate_plan, on the tracker's thread before tk_track: which frames, and the message; the set it returns says only that there is one. tk_flow_take, on that thread, when the other team is free: it will work on the newest planned, with how many real frames were let go since it last had one. tk_generate_make, on the other team's thread: the field and, unless through FSR, the picture. tk_flow_reads: whether the set is one it is reading; that set must not be built while it runs. */
+int tk_generate_plan(struct tracker *t, int set, const struct vt_msg *m, struct vt_msg *gm);
+void tk_flow_take(struct tracker *t, int skipped);
+void tk_generate_make(struct tracker *t);
+int tk_flow_reads(const struct tracker *t, int set);
+uint64_t tk_flow_cycles(const struct tracker *t);
+/* Flow on this team, not the tracker's. */
+int tk_flow_apart(struct tracker *t, tk_alloc_fn alloc, void *ctx, tk_run_fn run, void *run_ctx);
+/* Called between FSR's stages, on its thread: other cameras' flow need not wait for a whole frame of FSR. */
+void tk_fsr_between(struct tracker *t, void (*fn)(void *), void *ctx);
 /* After tk_track of the same real frame, whose result is `newer`: what the tracker says of the generated picture. Its box is the middle of the two real boxes around it, its features half a step back along their real steps. */
 void tk_generated_result(const struct tracker *t, const struct vt_msg *gm, const struct vt_result *newer, struct vt_result *o);
 /* From now on every generated frame's picture is written to these w x h bytes, 64 B aligned. Without this no frame is generated. */
 void tk_set_picture(struct tracker *t, uint8_t *pixels);
 /* This tracker's camera goes through FSR 3 (src/kern/fsr3.h): up to up_w x up_h and by Lanczos to w x h, or with up_w 0 straight to w x h. tk_fsr_frame: after a tk_generate of a real frame that returned a set: the real picture in pixels_real, and the one half way from the last, by flow, in pixels_generated. */
 int tk_fsr_setup(struct tracker *t, int up_w, int up_h, int w, int h, long double sharpness, tk_alloc_fn alloc, void *ctx, uint8_t *pixels_generated, uint8_t *pixels_real, tk_run_fn run, void *run_ctx);
-/* A real frame and the one tk_generate made before it, both through FSR, in that order. tk_fsr_frame does it all; apart: tk_fsr_take on the thread that runs tk_generate, with how many real frames were let go since FSR last had one, then tk_fsr_one for the generated frame (0) and the real one (1), on any. */
+/* After tk_generate or tk_generate_make: a real frame through FSR, then the frame between its picture and the last, from those pictures. tk_fsr_one says whether a picture half way was made: not across a frame let go. tk_fsr_frame is the same with nothing to say. */
 void tk_fsr_frame(struct tracker *t);
-void tk_fsr_take(struct tracker *t, int skipped);
-void tk_fsr_one(struct tracker *t, int which);
+int tk_fsr_one(struct tracker *t);
 void tk_fsr_report(const struct tracker *t, const char *name, double cycles_per_us);
 const struct fsr *tk_fsr_of(const struct tracker *t);
 /* The appearance correlation of a zero-mean template of 32 x 21 against a plane at (x, y): what the search for a lost region is built on, exposed for its gate. */

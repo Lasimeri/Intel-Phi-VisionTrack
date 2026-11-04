@@ -206,6 +206,15 @@ struct vt_fsr_meta {
 };
 _Static_assert(sizeof(struct vt_fsr_meta) == 64, "one line");
 
+/* A picture made between two real frames of a camera not through FSR, on its own time: its row has gone ahead. */
+struct vt_gen_meta {
+    uint64_t instance;
+    uint32_t slot, pad0;
+    uint64_t cycles_make;
+    uint32_t pad[10];
+};
+_Static_assert(sizeof(struct vt_gen_meta) == 64, "one line");
+
 /* The orange vectors of one real frame, brought down: rows y0 to y1 of a slot are written, the others are zero and are not sent. */
 struct vt_vec_meta {
     uint64_t instance;
@@ -261,6 +270,8 @@ struct vt_ctl {
     volatile uint64_t vec_pub VT_CACHELINE;     /* planes of orange vectors published, each with its meta */
     struct vt_cells_meta cells_meta[VT_CELL_CAMERAS] VT_CACHELINE;
     volatile uint64_t cells_pub[VT_CELL_CAMERAS] VT_CACHELINE; /* frames of vectors published, each with its meta */
+    struct vt_gen_meta gen_meta[VT_GEN_CAMERAS] VT_CACHELINE;
+    volatile uint64_t gen_pub[VT_GEN_CAMERAS] VT_CACHELINE; /* generated pictures published, each with its meta */
     struct vt_calib calib VT_CACHELINE;
     struct vt_msg desc[VT_DESC_RING] VT_CACHELINE;
 };

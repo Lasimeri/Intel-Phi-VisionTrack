@@ -6,8 +6,8 @@
 typedef long double real;
 
 #define GAIN 4          /* a vector drawn this many times its length: a quarter of a level's pixel is one pixel of the camera, as the window has always drawn it */
-#define PEN 2           /* a line's width here: about one and a half pixels once it is brought down by 3/4 */
-#define DOT 4           /* a cell's mark, likewise about three */
+#define PEN 2           /* a line's width here */
+#define DOT 4           /* a cell's mark */
 
 struct line {
     int x0, y0, x1, y1;

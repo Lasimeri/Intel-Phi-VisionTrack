@@ -134,6 +134,21 @@ int main(void)
     const uint64_t clear = cycles_now() - t0;
     printf("cycles one thread: down %llu erase %llu clear %llu\n", (unsigned long long)down, (unsigned long long)erase, (unsigned long long)clear);
     check(erase < clear, "drawing the lines again in zero is cheaper than clearing");
+    /* With no second stage, the way the live chain goes: the plane's own rows to bytes, nothing moved and nothing softened. */
+    {
+        struct fsr *straight = fsr_init(block(fsr_bytes(RW, RH, UW, UH, 0, 0)), RW, RH, UW, UH, 0, 0, 0.4L);
+        uint8_t *whole = block((size_t)UW * UH);
+        vd_draw(d, cells, COLS, ROWS, LEVEL, view, NULL);
+        int s0 = 0, s1 = 0;
+        check(fsr_down_span(straight, vd_rows(d), &s0, &s1) && s0 <= 144 && s1 > 592 && s1 <= UH, "straight: the rows to take out span all three");
+        memset(whole, 0x55, (size_t)UW * UH);
+        for (int tid = 0; tid < THREADS; tid++)
+            fsr_down_plane(straight, p, vd_rows(d), s0, s1, whole, NULL, tid, THREADS);
+        check(whole[368 * UW + 480] == 255 && whole[348 * UW + 536] == 255, "straight: the line where its cell and vector say, at full strength");
+        check(whole[368 * UW + 560] == 0 && whole[500 * UW + 40] == 0, "straight: nothing beyond it");
+        const uint64_t straight_hash = fnv(0xcbf29ce484222325ull, whole + (size_t)s0 * UW, (size_t)(s1 - s0) * UW);
+        printf("straight_hash %016llx rows %d %d\n", (unsigned long long)straight_hash, s0, s1);
+    }
     printf("%s\n", fails ? "vd: FAILED" : "vd: passed");
     return fails != 0;
 }
