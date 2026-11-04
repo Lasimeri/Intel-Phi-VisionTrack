@@ -644,7 +644,7 @@ int session_track(struct vt_ctl *ctl, struct vt_dma *dma, const struct topo *top
     }
     /* L and R's vectors on FSR's team, between its frames: the frames never wait for them, nor they for a gap in the frames. Their own way to the window. */
     int cams_on = 0, att_wanted[VT_CELL_CAMERAS] = {0, 0};
-    uint32_t cam_seen[VT_CELL_CAMERAS] = {0, 0};
+    uint32_t cam_seen[VT_CELL_CAMERAS] = {0, 0}, cam_tick[VT_CELL_CAMERAS] = {0, 0};
     uint64_t cam_seq[VT_CELL_CAMERAS] = {0, 0}, cam_dma[VT_CELL_CAMERAS] = {0, 0}, cells_meta_phys[VT_CELL_CAMERAS] = {0, 0};
     struct vt_cells_meta *cells_meta[VT_CELL_CAMERAS] = {NULL, NULL};
     if (cfg->vec_overlay && cfg->fsr_async && ld && fsr_cam == 2 && fsr_w.n <= n && ld_cell_bytes(ld, 0) <= VT_CELL_SLOT_BYTES && ld_cell_bytes(ld, 1) <= VT_CELL_SLOT_BYTES) {
@@ -1007,15 +1007,18 @@ int session_track(struct vt_ctl *ctl, struct vt_dma *dma, const struct topo *top
                 fuse_frame(&fu, cam, res);
             res->cycles[VT_T_EST] = vt_tsc() - t2;
             if (ld) {
-                flow_job[cam].t = cur;
-                flow_job[cam].set = set;
-                flow_job[cam].msg = *m;
-                flow_job[cam].has_box = res->state == VT_ST_NEW || res->state == VT_ST_OBSERVED || res->state == VT_ST_UNOBSERVED;
-                flow_job[cam].inside[0] = (float)((long double)res->cx - 0.5L * (long double)res->w);
-                flow_job[cam].inside[1] = (float)((long double)res->cy - 0.5L * (long double)res->h);
-                flow_job[cam].inside[2] = (float)((long double)res->cx + 0.5L * (long double)res->w);
-                flow_job[cam].inside[3] = (float)((long double)res->cy + 0.5L * (long double)res->h);
-                flow_job[cam].wanted = 1;
+                /* L and R are camera D's static reference: their vectors at half their rate, the operator's order, 2026-11-03. */
+                if (!(cams_on && cam < VT_CELL_CAMERAS) || (cam_tick[cam]++ & 1u) == 0u) {
+                    flow_job[cam].t = cur;
+                    flow_job[cam].set = set;
+                    flow_job[cam].msg = *m;
+                    flow_job[cam].has_box = res->state == VT_ST_NEW || res->state == VT_ST_OBSERVED || res->state == VT_ST_UNOBSERVED;
+                    flow_job[cam].inside[0] = (float)((long double)res->cx - 0.5L * (long double)res->w);
+                    flow_job[cam].inside[1] = (float)((long double)res->cy - 0.5L * (long double)res->h);
+                    flow_job[cam].inside[2] = (float)((long double)res->cx + 0.5L * (long double)res->w);
+                    flow_job[cam].inside[3] = (float)((long double)res->cy + 0.5L * (long double)res->h);
+                    flow_job[cam].wanted = 1;
+                }
                 res->cycles[VT_T_DEPTH] = depth_cycles; /* since the last result */
                 depth_cycles = 0;
             }

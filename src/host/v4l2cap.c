@@ -196,3 +196,12 @@ void v4l2cap_close(struct v4l2cap *c)
     close(c->fd);
     free(c);
 }
+
+int v4l2cap_steady_rate(struct v4l2cap *c)
+{
+    struct v4l2_control ctl;
+    memset(&ctl, 0, sizeof ctl);
+    ctl.id = V4L2_CID_EXPOSURE_AUTO_PRIORITY;
+    ctl.value = 0;
+    return ioctl(c->fd, VIDIOC_S_CTRL, &ctl);
+}

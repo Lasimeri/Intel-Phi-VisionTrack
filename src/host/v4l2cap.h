@@ -20,5 +20,7 @@ int v4l2cap_next(struct v4l2cap *c, uint8_t *gray, uint64_t *acq_ns, int timeout
 void v4l2cap_close(struct v4l2cap *c);
 /* The device's frames that failed to decode, since opening. */
 uint64_t v4l2cap_bad(const struct v4l2cap *c);
+/* Exposure may not stretch a frame past its time: the rate asked for holds in the dark, at the cost of light. 0, or -1 where the device has no such control. */
+int v4l2cap_steady_rate(struct v4l2cap *c);
 
 #endif

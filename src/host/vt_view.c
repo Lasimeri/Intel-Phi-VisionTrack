@@ -76,6 +76,7 @@ struct cam {
     const char *dev;
     int w, h, fps;          /* what the device is asked for */
     double rate;            /* frames a second kept of those: the operator's order, 2026-11-03. Each is half of what is shown */
+    int steady;             /* exposure may not lower the device's rate: the operator's order for camera D, 2026-11-03 */
     uint64_t next_ns, skipped; /* when the next one to keep is due; how many have been let go */
     uint8_t *ring;
     uint64_t acq[RING];
@@ -207,6 +208,8 @@ static void *capture_main(void *arg)
                 sleep(1);
                 continue;
             }
+            if (k->steady && v4l2cap_steady_rate(c))
+                fprintf(stderr, "vt_view: %s: exposure could not be held to the frame rate\n", k->dev);
         }
         const uint64_t i = __atomic_load_n(&k->captured, __ATOMIC_RELAXED);
         uint8_t *dst = k->ring + (i % RING) * bytes;
@@ -1331,7 +1334,8 @@ int main(int argc, char **argv)
     /* The rates are the user's, 11-03. In MJPEG this camera claims its largest alternate setting at any frame rate, so it must not share a USB 2 bus with the NexiGo, which does the same: STREAMON
      * answers ENOSPC. Measured at 720p15 and 1080p30 on one bus; solved by the two being on different controllers. */
     d->fps = 25;
-    d->rate = 12.0; /* half of L and R's, the operator's order. Asked for 25, it delivers about 14.9 in a dim room (dynamic exposure, 67 ms), so these land about 70 or 140 ms apart: measured 2026-11-03 */
+    d->rate = 12.0; /* half of L and R's, the operator's order. Of its own 25, with exposure held to it: 80 ms apart, with one gap of 120 a second */
+    d->steady = 1;
     A.ncam = 3;
     A.mirror = 1;
     A.levels = 5;
