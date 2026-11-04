@@ -275,3 +275,11 @@ void still_motion(const struct still *s, struct vt_motion *m)
     m->diff_limit = s->diff_limit;
     m->frames = s->frames;
 }
+
+void still_point(struct still *s, const struct vt_plane *a, const struct vt_plane *b, float x, float y, struct lk_out *o, int tid)
+{
+    const float margin = MARGIN, x_max = (float)s->c.w - 1.0f - margin, y_max = (float)s->c.h - 1.0f - margin;
+    x = x < margin ? margin : x > x_max ? x_max : x;
+    y = y < margin ? margin : y > y_max ? y_max : y;
+    lk_track_vx(a, b, 0, &s->lk, x, y, 0.0f, 0.0f, o, s->tiles[tid]);
+}

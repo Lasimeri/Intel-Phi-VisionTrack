@@ -2,6 +2,7 @@
 #include "autoref.h"
 
 #include <stdlib.h>
+#include <string.h>
 
 #define HOLD 12       /* frames unmoved before a cell may be part of a reference: a second, at the 12 a second these come */
 #define CAP 240       /* of what a cell has stood through: twenty seconds is as good as it gets, so a place that once stood long does not outrank what stands now for ever */
@@ -10,7 +11,7 @@
 struct autoref {
     int cols, rows;
     unsigned short *still, *still_d;
-    unsigned char *good;
+    unsigned char *good, *block;
     /* (cols + 1) x (rows + 1) */
     unsigned *sat_score, *sat_young, *sat_good;
 };
@@ -26,10 +27,11 @@ struct autoref *autoref_create(int cols, int rows)
     a->still = calloc(cells, sizeof *a->still);
     a->still_d = calloc(cells, sizeof *a->still_d);
     a->good = calloc(cells, 1);
+    a->block = calloc(cells, 1);
     a->sat_score = calloc(sat, sizeof *a->sat_score);
     a->sat_young = calloc(sat, sizeof *a->sat_young);
     a->sat_good = calloc(sat, sizeof *a->sat_good);
-    if (!a->still || !a->still_d || !a->good || !a->sat_score || !a->sat_young || !a->sat_good) {
+    if (!a->still || !a->still_d || !a->good || !a->block || !a->sat_score || !a->sat_young || !a->sat_good) {
         autoref_destroy(a);
         return NULL;
     }
@@ -43,6 +45,7 @@ void autoref_destroy(struct autoref *a)
     free(a->still);
     free(a->still_d);
     free(a->good);
+    free(a->block);
     free(a->sat_score);
     free(a->sat_young);
     free(a->sat_good);
@@ -80,7 +83,7 @@ int autoref_best(struct autoref *a, int wc, int wr, int *col, int *row)
         for (int c = 0; c < cols; c++) {
             const size_t i = (size_t)r * (size_t)cols + (size_t)c;
             line_score += a->good[i] * (1u + a->still_d[i]);
-            line_young += a->still[i] < HOLD;
+            line_young += a->still[i] < HOLD || a->block[i];
             line_good += a->good[i];
             a->sat_score[here + (size_t)c + 1u] = a->sat_score[up + (size_t)c + 1u] + line_score;
             a->sat_young[here + (size_t)c + 1u] = a->sat_young[up + (size_t)c + 1u] + line_young;
@@ -104,6 +107,15 @@ int autoref_best(struct autoref *a, int wc, int wr, int *col, int *row)
             }
         }
     return found;
+}
+
+void autoref_clear_blocks(struct autoref *a) { memset(a->block, 0, (size_t)a->cols * (size_t)a->rows); }
+
+void autoref_block(struct autoref *a, int col, int row, int wc, int wr)
+{
+    for (int r = row < 0 ? 0 : row; r < row + wr && r < a->rows; r++)
+        for (int c = col < 0 ? 0 : col; c < col + wc && c < a->cols; c++)
+            a->block[(size_t)r * (size_t)a->cols + (size_t)c] = 1;
 }
 
 int autoref_moved(const struct autoref *a, int col, int row, int wc, int wr)

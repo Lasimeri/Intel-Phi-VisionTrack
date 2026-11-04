@@ -18,6 +18,8 @@
 #include "arena.h"
 #include "fuse.h"
 #include "img.h"
+#include "gimref.h"
+#include "lk.h"
 #include "vecdraw.h"
 #include "live_depth.h"
 #include "plane.h"
@@ -361,7 +363,9 @@ struct vec_worker {
     int has_box;
     uint64_t instance;
     int y0, y1, lines, any;
-    uint64_t cycles_vectors, cycles_draw, cycles_down;
+    uint64_t cycles_vectors, cycles_draw, cycles_down, cycles_gim;
+    struct gimref gim;
+    const struct vt_plane *prev;
     uint32_t want VT_CACHELINE, done VT_CACHELINE;
     int stop VT_CACHELINE, team_ok;
 };
@@ -392,6 +396,23 @@ static void *vec_worker_main(void *arg)
         const uint64_t t1 = vt_tsc();
         int cols, rows;
         const struct vt_cell *cells = ld_cells(w->ld, w->cam, &cols, &rows);
+        /* Where D holds still, and how far that moved since the last frame. So far it moves nothing. */
+        gimref_choose(&w->gim, cells, w->has_box ? w->inside : NULL, w->lines >= 3);
+        if (w->prev) {
+            const int points = gimref_points(&w->gim);
+            for (int i = 0; i < w->gim.nwin; i++)
+                for (int k = 0; k < points; k++) {
+                    float x, y;
+                    struct lk_out o;
+                    gimref_point(&w->gim, i, k, &x, &y);
+                    ld_point(w->ld, w->cam, w->prev, w->cur, x, y, &o, 0);
+                    gimref_add(&w->gim, i, (float)((long double)o.x - (long double)x), (float)((long double)o.y - (long double)y), o.status == 0);
+                }
+            gimref_finish(&w->gim);
+        }
+        w->prev = w->cur;
+        const uint64_t t_gim = vt_tsc();
+        w->cycles_gim = t_gim - t1;
         w->lines = vd_draw(w->draw, cells, cols, rows, w->level, w->view, w->has_box ? w->inside : NULL);
         w->any = fsr_down_span(w->fsr, vd_rows(w->draw), &w->y0, &w->y1);
         const uint64_t t2 = vt_tsc();
@@ -401,7 +422,7 @@ static void *vec_worker_main(void *arg)
         }
         const uint64_t t3 = vt_tsc();
         w->cycles_vectors = t1 - t0;
-        w->cycles_draw = t2 - t1;
+        w->cycles_draw = t2 - t_gim;
         w->cycles_down = t3 - t2;
         __atomic_store_n(&w->done, job, __ATOMIC_RELEASE);
     }
@@ -447,6 +468,19 @@ static uint64_t vec_publish(struct vt_dma *dma, const struct arena *a, const str
     meta->cycles_vectors = w->cycles_vectors;
     meta->cycles_draw = w->cycles_draw;
     meta->cycles_down = w->cycles_down;
+    meta->cycles_gim = w->cycles_gim;
+    meta->gim_state = (uint32_t)w->gim.state;
+    meta->gim_windows = (uint32_t)w->gim.nwin;
+    meta->gim_read_u = (float)w->gim.read_u;
+    meta->gim_read_v = (float)w->gim.read_v;
+    meta->gim_move_u = (float)w->gim.move_u;
+    meta->gim_move_v = (float)w->gim.move_v;
+    meta->gim_w = (uint16_t)(w->gim.wc * (VT_CELL_W << w->gim.level));
+    meta->gim_h = (uint16_t)(w->gim.wr * (VT_CELL_H << w->gim.level));
+    for (int i = 0; i < w->gim.nwin; i++) {
+        meta->gim_win[i][0] = (uint16_t)(w->gim.col[i] * (VT_CELL_W << w->gim.level));
+        meta->gim_win[i][1] = (uint16_t)(w->gim.row[i] * (VT_CELL_H << w->gim.level));
+    }
     return vt_dma_copy(dma, meta_phys, host_meta, sizeof *meta, host_pub, seq + 1);
 }
 
@@ -693,7 +727,7 @@ int session_track(struct vt_ctl *ctl, struct vt_dma *dma, const struct topo *top
         vec_w.temp_each = vec_w.fsr ? (fsr_down_temp_bytes(vec_w.fsr) + 63u) & ~(size_t)63u : 0u;
         vec_w.temp = nv ? arena_take(&a, (uint64_t)nv * vec_w.temp_each, 64) : NULL;
         vec_w.pic = nv ? arena_take(&a, (uint64_t)cfg->fsr_w * cfg->fsr_h, 64) : NULL;
-        vec_meta = nv ? arena_take(&a, 64, 64) : NULL;
+        vec_meta = nv ? arena_take(&a, sizeof(struct vt_vec_meta), 64) : NULL;
         if (!draw_mem || !vec_w.fsr || !vec_w.temp || !vec_w.pic || !vec_meta) {
             fprintf(stderr, "vtrackd: no spare core or no room for the orange vectors: the window draws them as before\n");
         } else {
@@ -704,6 +738,14 @@ int session_track(struct vt_ctl *ctl, struct vt_dma *dma, const struct topo *top
             vec_w.level = ld_flow_level(ld);
             vec_w.view = (long double)cfg->fsr_up_w / (long double)fsr_camera_w(cfg);
             vec_w.n = nv;
+            {
+                int gc, gr;
+                ld_cells(ld, fsr_cam, &gc, &gr);
+                if (gimref_init(&vec_w.gim, gc, gr, ld_flow_level(ld))) {
+                    fprintf(stderr, "vtrackd: no memory for camera D's reference\n");
+                    return -1;
+                }
+            }
             if (pthread_create(&vec_th, NULL, vec_worker_main, &vec_w)) {
                 fprintf(stderr, "vtrackd: no thread for the orange vectors\n");
                 return -1;

@@ -425,7 +425,7 @@ static void *link_main(void *arg)
     double last_progress = 0.0;
     float resume_roi[VT_MAX_CAMERAS][4];
     int resume[VT_MAX_CAMERAS] = {0, 0, 0}, debug_sent = -1;
-    FILE *pf[VT_MAX_CAMERAS] = {NULL, NULL, NULL}, *track_csv = NULL, *depth_csv = NULL;
+    FILE *pf[VT_MAX_CAMERAS] = {NULL, NULL, NULL}, *track_csv = NULL, *depth_csv = NULL, *gim_csv = NULL;
     uint64_t fsr_seen = 0, depth_seen = 0, vec_seen = 0;
     uint64_t cells_seen[VT_CELL_CAMERAS] = {0, 0};
     unsigned depth_lines = 0;
@@ -683,6 +683,21 @@ static void *link_main(void *arg)
             vec_seen = vp;
             struct vt_vec_meta vm;
             memcpy(&vm, &c->vec_meta, sizeof vm);
+            /* A line for each frame of D: what its own reference read. */
+            if (!gim_csv) {
+                char path[80];
+                const time_t wall = time(NULL);
+                struct tm tm;
+                localtime_r(&wall, &tm);
+                strftime(path, sizeof path, "logs/live/gim-%Y%m%d-%H%M%S.csv", &tm);
+                gim_csv = fopen(path, "w");
+                if (gim_csv)
+                    fprintf(gim_csv, "instance,state,windows,lines,read_u,read_v,move_u,move_v,gim_us\n");
+            }
+            if (gim_csv) {
+                fprintf(gim_csv, "%llu,%u,%u,%u,%.4f,%.4f,%.4f,%.4f,%.0f\n", (unsigned long long)vm.instance, vm.gim_state, vm.gim_windows, vm.lines, (double)vm.gim_read_u, (double)vm.gim_read_v, (double)vm.gim_move_u, (double)vm.gim_move_v, (double)vm.cycles_gim * 1e6 / TSC_HZ);
+                fflush(gim_csv);
+            }
             if (vm.slot < VT_VEC_SLOTS) {
                 pthread_mutex_lock(&A.m);
                 A.vec_at[vm.slot] = (struct vec_plane){vm.instance, vm.y0, vm.y1, vm.w, 1u};
@@ -1727,6 +1742,16 @@ int main(int argc, char **argv)
                 dv_cells(&v, show_cells[k], show_cell_at[k].cols, show_cell_at[k].rows, (int)show_cell_at[k].level, ox, oy, K->vw, K->vs, A.mirror, vectors_all, has_box ? inside : NULL);
             if (tracking && map && !dragging && !baked && !own)
                 dv_vectors(&v, map, k, ox, oy, K->vw, K->vs, A.mirror, vectors_all);
+            /* Where D holds still: its own reference, in the same grey as L and R's. */
+            if (tracking && !dragging && A.vec && k == A.fsr_cam)
+                for (uint32_t gi = 0; gi < A.vec_last.gim_windows && gi < VT_GIM_WINDOWS; gi++) {
+                    const double gs = K->vs, gx0 = A.vec_last.gim_win[gi][0] * gs, gy0 = A.vec_last.gim_win[gi][1] * gs, gx1 = gx0 + A.vec_last.gim_w * gs, gy1 = gy0 + A.vec_last.gim_h * gs;
+                    const int sx0 = show_x(ox, K->vw, gx0), sx1 = show_x(ox, K->vw, gx1), sy0 = oy + (int)gy0, sy1 = oy + (int)gy1;
+                    outline_line(&v, sx0, sy0, sx1, sy0, GREY, 0);
+                    outline_line(&v, sx1, sy0, sx1, sy1, GREY, 0);
+                    outline_line(&v, sx1, sy1, sx0, sy1, GREY, 0);
+                    outline_line(&v, sx0, sy1, sx0, sy0, GREY, 0);
+                }
             draw_view(&v, ox, oy, K, &r[k], tracking);
             text_outlined(&v, ox + 8, oy + K->h - 22, 2, caps[k] ? WHITE : GREY, K->name);
             if (!caps[k])
@@ -1869,6 +1894,10 @@ int main(int argc, char **argv)
                 panel_line(&v, &y, GREY, " card ms: normalize %.1f sweep %.1f agg %.1f decide %.1f", (double)h->cycles_normalize * us, (double)h->cycles_sweep * us, (double)h->cycles_aggregate * us, (double)h->cycles_decide * us);
                 panel_line(&v, &y, GREY, " flow at level %u: L %u x %u cells", h->flow_level, h->cam[0].cols, h->cam[0].rows);
                 panel_line(&v, &y, GREY, " vectors ms L %.1f R %.1f D %.1f  moving %u %u %u", (double)h->cam[0].cycles_vectors * us, (double)h->cam[1].cycles_vectors * us, (double)h->cam[2].cycles_vectors * us, h->cam[0].moving, h->cam[1].moving, h->cam[2].moving);
+                if (A.vec && A.vec_count) {
+                    static const char *const gim_names[4] = {"none yet", "unsure", "still", "MOVED"};
+                    panel_line(&v, &y, GREY, " D's own reference: %u windows, %s, read %+.2f %+.2f px, %.1f ms on the spare core", A.vec_last.gim_windows, gim_names[A.vec_last.gim_state & 3u], (double)A.vec_last.gim_read_u, (double)A.vec_last.gim_read_v, (double)A.vec_last.cycles_gim * us);
+                }
                 if (A.vec && A.cells_count[0]) {
                     rate_update(&A.cells_rate[0], A.cells_count[0], t);
                     rate_update(&A.cells_rate[1], A.cells_count[1], t);

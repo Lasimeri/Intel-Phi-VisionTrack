@@ -54,6 +54,7 @@ static inline uint64_t vt_vec_offset(uint32_t slot) { return VT_VEC_OFFSET + (ui
 #define VT_CELLS_OFFSET (VT_VEC_OFFSET - VT_CELLS_BYTES)
 static inline uint64_t vt_cells_offset(uint32_t camera, uint32_t slot) { return VT_CELLS_OFFSET + ((uint64_t)camera * VT_CELL_SLOTS + slot) * VT_CELL_SLOT_BYTES; }
 #define VT_FRAME_AREA (VT_PART_BYTES - VT_FRAME_OFFSET - VT_GEN_BYTES - VT_FSR_BYTES - VT_VEC_BYTES - VT_CELLS_BYTES)
+#define VT_GIM_WINDOWS 3 /* places camera D keeps as its own reference */
 
 #define VT_MAX_LEVELS 6
 #define VT_MAX_FEATURES 512
@@ -209,8 +210,15 @@ struct vt_vec_meta {
     uint64_t instance;
     uint32_t slot, w, h, y0, y1, lines, threads, pad;
     uint64_t cycles_vectors, cycles_draw, cycles_down;
+    /* Camera D's own reference (src/kern/gimref.h): its state, how many windows, where, how big, what it read, what came through. */
+    uint32_t gim_state, gim_windows;
+    float gim_read_u, gim_read_v, gim_move_u, gim_move_v;
+    uint16_t gim_win[VT_GIM_WINDOWS][2];
+    uint16_t gim_w, gim_h;
+    uint64_t cycles_gim;
+    uint32_t pad2[4];
 };
-_Static_assert(sizeof(struct vt_vec_meta) == 64, "one line");
+_Static_assert(sizeof(struct vt_vec_meta) == 128, "two lines");
 
 /* One frame's vectors of L or R. */
 struct vt_cells_meta {

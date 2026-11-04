@@ -27,6 +27,7 @@ struct still_cfg {
 };
 
 struct still;
+struct lk_out;
 
 size_t still_bytes(const struct still_cfg *c);
 struct still *still_create(const struct still_cfg *c, void *(*alloc)(void *ctx, size_t bytes), void *ctx);
@@ -37,6 +38,8 @@ void still_vectors(struct still *s, const struct vt_plane *cur, int tid, int n);
 void still_decide(struct still *s);
 void still_update(struct still *s, const struct vt_plane *cur, int tid, int n);
 void still_finish(struct still *s);
+/* How far a point moved from plane a to plane b of this camera, one thread (tid): for what asks about places, not cells. */
+void still_point(struct still *s, const struct vt_plane *a, const struct vt_plane *b, float x, float y, struct lk_out *o, int tid);
 
 const struct vt_plane *still_mean(const struct still *s);
 const struct vt_cell *still_cells(const struct still *s);

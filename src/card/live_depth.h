@@ -13,6 +13,7 @@
 #include "vt_proto.h"
 
 struct live_depth;
+struct lk_out;
 
 /* What it will take from the arena. */
 size_t ld_bytes(const struct vt_config *cfg, int threads);
@@ -31,6 +32,8 @@ void ld_rest(struct live_depth *l, int cam, const struct vt_plane *cur);
 void ld_update(struct live_depth *l, int cam, const struct vt_plane *cur, struct team *tm);
 void ld_attitude(struct live_depth *l, int cam);
 size_t ld_cell_bytes(const struct live_depth *l, int cam);
+/* One point of a camera's picture at ld_flow_level, from plane a to plane b, on the caller's thread as team member tid. */
+void ld_point(struct live_depth *l, int cam, const struct vt_plane *a, const struct vt_plane *b, float x, float y, struct lk_out *o, int tid);
 const struct vt_cell *ld_cells(const struct live_depth *l, int cam, int *cols, int *rows);
 /* After ld_frame of camera D: the map, if it can be made, is sent with status_addr set to its sequence after it. The last DMA line's sequence; 0 when no map was made; UINT64_MAX on failure. */
 uint64_t ld_map(struct live_depth *l, const struct vt_msg *m, uint64_t status_addr);

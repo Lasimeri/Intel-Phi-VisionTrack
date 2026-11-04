@@ -332,6 +332,8 @@ void ld_frame(struct live_depth *l, int cam, const struct vt_plane *cur)
 
 size_t ld_cell_bytes(const struct live_depth *l, int cam) { return still_cell_bytes(l->st[cam]); }
 
+void ld_point(struct live_depth *l, int cam, const struct vt_plane *a, const struct vt_plane *b, float x, float y, struct lk_out *o, int tid) { still_point(l->st[cam], a, b, x, y, o, tid); }
+
 const struct vt_cell *ld_cells(const struct live_depth *l, int cam, int *cols, int *rows)
 {
     struct vt_motion m;

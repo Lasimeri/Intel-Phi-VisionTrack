@@ -15,6 +15,9 @@ void autoref_destroy(struct autoref *a);
 void autoref_feed(struct autoref *a, const struct vt_cell *cells, int d_moving);
 /* The best window of wc x wr cells: 1 and its first column and row, or 0 if none has held still with enough corners. */
 int autoref_best(struct autoref *a, int wc, int wr, int *col, int *row);
+/* Places not to choose: another region's, the operator's box. They last until cleared. */
+void autoref_clear_blocks(struct autoref *a);
+void autoref_block(struct autoref *a, int col, int row, int wc, int wr);
 /* How many cells of that window moved in the last frame fed. */
 int autoref_moved(const struct autoref *a, int col, int row, int wc, int wr);
 
