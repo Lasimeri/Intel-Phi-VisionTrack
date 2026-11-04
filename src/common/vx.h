@@ -150,6 +150,10 @@ static inline float vx_hmax(vxf v)
 }
 static inline void vx_prefetch0(const void *p) { __builtin_ia32_knc_vprefetch0_m(p); }
 static inline void vx_prefetch1(const void *p) { __builtin_ia32_knc_vprefetch1_m(p); }
+/* Division and square root by Newton from the bits: this card has no vector divide, and vrcp23ps is an approximation the host could only copy by table. Fixed iterations of fused operations round the same on both sides, so a kernel
+ * stays bit-exact. Relative error under 1e-6 from 3 iterations (measured: vt_m4). x > 0. */
+static inline vxf vx_bits_rsub(vxf x, const uint32_t *k) { return (vxf)__builtin_ia32_knc_vpsubrd_zzm(VX_UI, VX_ALL, (__v16si)x, k, VX_SSS_1TO16); }
+static inline vxf vx_bits_shr1(vxf x) { return (vxf)__builtin_ia32_knc_vpsrld_zzi(VX_UI, VX_ALL, (__v16si)x, 1, 0); }
 
 #else /* the host model */
 
@@ -242,6 +246,30 @@ static inline float vx_hmax(vxf v)
 }
 static inline void vx_prefetch0(const void *p) { (void)p; }
 static inline void vx_prefetch1(const void *p) { (void)p; }
+static inline vxf vx_bits_rsub(vxf x, const uint32_t *k) { vxf r; VX_LANE_LOOP { uint32_t b; memcpy(&b, &x.l[i], 4); b = *k - b; memcpy(&r.l[i], &b, 4); } return r; }
+static inline vxf vx_bits_shr1(vxf x) { vxf r; VX_LANE_LOOP { uint32_t b; memcpy(&b, &x.l[i], 4); b >>= 1; memcpy(&r.l[i], &b, 4); } return r; }
 
 #endif
+
+/* 1 / x and 1 / sqrt(x), x > 0: on both sides the same fused operations from the same bits. */
+static inline vxf vx_rcp(vxf x, const float *one)
+{
+    static const uint32_t K VX_ALIGNED = 0x7EF311C7u;
+    vxf y = vx_bits_rsub(x, &K);
+    const vxf o = vx_bcast(one);
+    for (int i = 0; i < 3; i++)
+        y = vx_fma(y, vx_fnma(x, y, o), y);
+    return y;
+}
+static inline vxf vx_sqrt(vxf x, const float *half, const float *three_halves)
+{
+    static const uint32_t K VX_ALIGNED = 0x5F375A86u;
+    vxf y = vx_bits_rsub(vx_bits_shr1(x), &K);
+    const vxf h = vx_bcast(half), t = vx_bcast(three_halves);
+    const vxf hx = vx_mul(x, h);
+    for (int i = 0; i < 3; i++)
+        y = vx_mul(y, vx_fnma(hx, vx_mul(y, y), t));
+    return vx_mul(x, y);
+}
+
 #endif

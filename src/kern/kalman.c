@@ -123,3 +123,15 @@ void kf_update(struct kf *k, const long double *z, const long double *r33)
             k->P[r][c] = v;
         }
 }
+
+int kf_refused(struct kf_lock *l)
+{
+    l->run++;
+    return l->run >= KF_RELEASE;
+}
+
+long double kf_axis_innovation(const struct kf *k, const long double *z, const long double *r33, int axis)
+{
+    const long double y = z[axis] - k->x[axis];
+    return y * y / (k->P[axis][axis] + r33[4 * axis]);
+}

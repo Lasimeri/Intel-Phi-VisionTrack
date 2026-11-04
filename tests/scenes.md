@@ -4,7 +4,7 @@ What `vt_run --gate` holds each scene to (`score_gate` in `src/host/score.c`). T
 
 Every scene, always: a hidden region never reads as observed, and the track id does not change.
 
-`check.sh` also runs sixteen of them with `--framegen`, to the same tolerances on the real frames, card against host on every result (**five fail today: `smallbox`, `rotate`, `jointed`, `dart`, `dual`**, [limitations](../docs/limitations.md)), and `vt_ncc_check`: nearly blank windows must never match in the appearance search, which no scene could show (an exactly flat patch has zero variance and was already refused).
+`check.sh` also runs them with `--framegen`, to the same tolerances on the real frames, card against host on every result, and compares real rows bit for bit with generation on and off. Generated boxes: median within 1 px of the real ones, p95 within 3 px. Box scenes have 3D limits, and any row flagged not proven or using a members' middle must be true to 3 stated sigma (`score_gate`). FSR: `hold` and `bigbox`, card against host, and at least 6 dB of noise taken out of `hold`: a bug detector, since how it looks is the operator's to judge.
 
 **What these do not cover.** Blur and parts moving differently are here (`jointed`, `offjointed`, `dart`), real change of shape and light on a thing are not. Scenes passing does not prove the live window: a tracker passed all 79 gates of its day and failed at once on real targets. **The box scenes have no 3D limit, and 3D on them is known to be wrong before the head moves** ([limitations](../docs/limitations.md)).
 
@@ -36,5 +36,6 @@ Every scene, always: a hidden region never reads as observed, and the track id d
 | dart | rigid, to and fro, up to 28 px a frame with half a frame of blur, box 2.4 times the thing | >= 0.95 | | | | as offbox |
 | passby | a still thing selected, another crosses the box without touching it: the window must not leave | >= 0.95 | | | | window travel max <= 3 px |
 | dual | two independently tracked views, rotated, focal lengths differ, shutter 11 ms apart; TRUE calibration given (`scene.sh dual 640x480 --dual --gate`) | see `score_gate` | | | <= 15 mm | proves the fusion mechanism, not any calibration. Set from the measured 11.20 mm at 4 m with little parallax: the first limit, 10 mm, was written before the scene had ever run and failed it |
+| dualbox | the same rig over a busy background, the thing still for 2 s, boxes 2.4 times it and off centre each its own way (`scene.sh dualbox 640x480 --dual --gate`) | >= 0.95 | | | filter <= 1 m | unproven rows true to 3 sigma: no correspondence between views, so no better is on offer |
 
 The depth map has no scene here, by the user's direction: it runs on the real room, which has no per-pixel truth. Its checks are in [measurements.md](../docs/measurements.md): card against host hash over real frames (a gate in `check.sh`, where those frames exist), a deliberately rotated pose must lose, the sweep's depth against depths triangulated from landmarks (`vt_mapcheck`), and physical sizes.

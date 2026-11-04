@@ -18,6 +18,8 @@ struct x11event {
 
 /* A window of w x h at (x, y) on the desktop (negative: where the window manager likes). It does not take the keyboard from whatever has it. 0, or -1 with a message. */
 int x11view_open(struct x11view *v, int w, int h, int x, int y, const char *title);
+/* Before x11view_open: no title bar or border, for a window as tall as its monitor. */
+void x11view_noframe(int on);
 /* One pending event, or X11_NONE. */
 int x11view_poll(struct x11view *v, struct x11event *e);
 /* Shows the image. */
@@ -33,6 +35,8 @@ int x11view_where(struct x11view *v, int *x, int *y);
 void x11view_gray(struct x11view *v, const uint8_t *gray, int gw, int gh, int pitch, int x, int y, int step);
 /* The same at scale 1, left and right exchanged. */
 void x11view_gray_mirror(struct x11view *v, const uint8_t *gray, int gw, int gh, int pitch, int x, int y);
+/* What is already at (x, y), toward colour by a plane of w columns: rows y0 to y1 of it. Mirror as x11view_gray_mirror does. */
+void x11view_tint(struct x11view *v, const uint8_t *cover, int w, int y0, int y1, int x, int y, int mirror, uint32_t colour);
 void x11view_fill(struct x11view *v, int x, int y, int w, int h, uint32_t c);
 void x11view_line(struct x11view *v, int x0, int y0, int x1, int y1, uint32_t c);
 /* A line of dashes: how a prediction is told from a measurement, in any light. */

@@ -58,7 +58,7 @@ An operator's drag holds the thing and whatever is around it. The first tracker 
 | Riders | a new feature has no vote until the head has gone 2 px since its birth; it is then dropped unless it went with the head to within half that distance. At 8 px it votes that same frame, since at speed it may not live to the next | riders graduating by age, which is how the background became the majority |
 | Parking | under 0.1 px a frame for 15 real frames. A parked head starts again only if at least half its voters moved, so a part of the thing waving does not move the window | |
 | The box | closes once when the head first moves, then goes half way each frame to the members' span times 1.25 plus 8 px, never past the operator's box. The centre stays on the point chosen, unless that lies outside the members' span, or their scatter (MAD over 1 px) says the thing is not rigid: it then settles toward their middle at 5 % a frame | the box as drawn, which the operator found too padded |
-| Generated frames | move the features and decide nothing | |
+| Generated frames | nothing: for the eye only; a generated row's box is the middle of the two real boxes | |
 
 **Corners are judged where they stand.** The Harris response goes as the gradient to the fourth power, so against one threshold for the box, a sharp corner on an object's outline, whose patch straddles two motions, erased everything inside the object: 11 corners in 384 x 307, and a region lagging 18 %. Now each corner answers to the strongest of its 16 x 16 cell and the eight around it, above a floor. Small boxes space their features closer, down to 6 px, so a small thing gets enough.
 
@@ -101,11 +101,19 @@ FSR 3's interpolation leans on a game's own motion vectors, which a camera does 
 
 **Why on the card and not AMD's shaders on the GPU.** The only GPU here is an RTX 3090 Ti, so AMF is out, and the SDK needs DX12 or Vulkan. Running its shaders there would put image processing on a second chip, with a copy each way per frame. On the card both frames and the result are already in its memory.
 
-**A generated frame moves features and decides nothing.** Its pixels are invented. Membership, reseeding, appearance, the search for a lost region, stereo and the filter run on real frames only. A feature whose flow fails on it goes where the model says. If too little agrees, the frame is passed over and the next real frame tracks from the last real one. The window keeps the 3D of the last real frame.
+**The tracker does not read a generated frame.** Its pixels are invented, and following them cost it the target (`dart`) or a steady drift (`smallbox`, about .067 px a frame): each real frame started from a place measured on a blended picture. A real row is the same to the bit with generation on or off. A generated row is made afterwards: the middle of the two real boxes, and each feature half a step back along its own real step.
 
 **It costs a real frame milliseconds, not a frame.** A generated frame needs the newer real frame, so it is made once that frame has landed, and its result reports an instant half a frame old. The real frame's own result waits for it: about 6 ms to make and 1 to track at 1080p (arithmetic from the stages; the latency itself is not yet measured live).
 
 **What it can and cannot do.** It adds no information: everything in a generated frame comes from the two real ones. What it gives the tracker is two half steps for one whole one, which is why it helps where features are lost or torn between motions, and adds a little noise where nothing was wrong (`swing`).
+
+### Camera D through FSR (the operator's order, 2026-11-03)
+
+720p at 12.5 frames a second goes up to 1440p by FSR 3.1.6 (`src/kern/fsr3.c`), on real frames only, so nothing invented enters its history. Flow makes the frame half way from the two finished pictures, 1440p25. A Lanczos brings both to 1080p. FSR has its own team on each core's third and fourth hardware threads: it slows the tracker while both run, the tracker never waits for it, and it lets a frame go if it is still busy. The tracker follows the raw frames.
+
+One channel, one vector a block, no gather: each source row is filtered across once, by permute tables, and an output row mixes four of them; a still block reads its history directly. There is no vector divide on this card and its reciprocal instruction is an approximation, so division and square root are Newton steps from the bits, the same on card and host.
+
+**The orange vectors on the spare core (the operator's order, 2026-11-03).** D's motion vectors, which cells moved, lines at 1440p, and those brought down with the picture's own tables, all on the core nothing else uses (`src/kern/vecdraw.c`, `struct vec_worker`). The session hands a frame over and takes the plane back at the top of its loop; only its own part of that frame waits for a gap. Pictures have one channel, so the lines travel as a plane of their own, and the window finds the one of that instant when the picture comes due. L and R's vectors and means run on FSR's team between its frames, each camera at least once a frame of FSR's, and go to the window alone; a map can no longer hold them up, and a map reading a mean being updated sees some of each frame.
 
 ## Three cameras (user's direction, 2026-11-03)
 

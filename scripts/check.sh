@@ -14,7 +14,7 @@ bench_begin
 cleanup() {
     scripts/vtrackd.sh stop >/dev/null 2>&1 || true
     # A live window is waiting for the card: give it a program to talk to.
-    if pgrep -x vt_view >/dev/null; then scripts/vtrackd.sh start 512 >/dev/null 2>&1 || true; fi
+    if pgrep -x vt_view >/dev/null; then scripts/vtrackd.sh start 1024 >/dev/null 2>&1 || true; fi
     bench_end
     rm -rf "$s"
 }
@@ -66,7 +66,7 @@ else
 fi
 
 scripts/vtrackd.sh stop >/dev/null 2>&1 || true
-scripts/vtrackd.sh start 512 >/dev/null
+scripts/vtrackd.sh start 1024 >/dev/null
 
 for n in translate shapes camera brightness noise occlusion loss leave helix linear3d glitch repeat flat bigbox smallbox stillstart rotate swing hold offbox jointed offjointed passby dart; do
     if scripts/scene.sh "$n" 640x480 --gate >"$s/scene" 2>&1; then pass "scene $n: tolerances and replay"; else fail "scene $n"; /usr/bin/grep -aE 'GATE MISS|DIFFERS' "$s/scene" | head -6; fi
@@ -78,7 +78,28 @@ for n in translate occlusion loss bigbox smallbox stillstart rotate swing hold o
 done
 if scripts/scene.sh comeback 640x480 --frames 240 --gate --framegen >"$s/scene" 2>&1; then pass "scene comeback with generated frames: tolerances and replay"; else fail "scene comeback with generated frames"; /usr/bin/grep -aE 'GATE MISS|DIFFERS' "$s/scene" | head -6; fi
 if scripts/scene.sh dual 640x480 --dual --gate --framegen >"$s/scene" 2>&1; then pass "scene dual with generated frames: tolerances and replay"; else fail "scene dual with generated frames"; /usr/bin/grep -aE 'GATE|replay' "$s/scene" | head -6; fi
+if scripts/scene.sh dualbox 640x480 --dual --gate --framegen >"$s/scene" 2>&1; then pass "scene dualbox with generated frames: tolerances and replay"; else fail "scene dualbox with generated frames"; /usr/bin/grep -aE 'GATE|replay' "$s/scene" | head -6; fi
 if scripts/scene.sh dual 640x480 --dual --gate >"$s/scene" 2>&1; then pass "scene dual, two independently tracked views: tolerances and replay"; else fail "scene dual"; /usr/bin/grep -aE 'GATE|replay' "$s/scene" | head -6; fi
+if scripts/scene.sh dualbox 640x480 --dual --gate >"$s/scene" 2>&1; then pass "scene dualbox, two boxes drawn by hand over a still thing: tolerances and replay"; else fail "scene dualbox"; /usr/bin/grep -aE 'GATE|replay' "$s/scene" | head -6; fi
+# The orange vectors: drawn at the upscaled size, down with FSR's tables, card = host; where they land, what is left after the next erase, and that erasing beats clearing, on the card's own clock.
+out/host/vd_ref >"$s/vdh" 2>&1 && pass "orange vectors: every check on the host" || { fail "orange vectors on the host"; /usr/bin/grep -a FAIL "$s/vdh" | head -4; }
+scripts/card_run.sh -p 256 vt_vd >"$s/vdc" 2>&1 && pass "orange vectors: every check on the card" || { fail "orange vectors on the card"; /usr/bin/grep -a FAIL "$s/vdc" | head -4; }
+if [[ "$(/usr/bin/grep -a down_hash "$s/vdh")" == "$(/usr/bin/grep -a down_hash "$s/vdc")" && -n "$(/usr/bin/grep -a down_hash "$s/vdc")" ]]; then pass "orange vectors: card = host, bit for bit"; else fail "orange vectors: card and host differ"; fi
+# FSR on camera D's path: 720p class up, flow between the pictures, Lanczos down. Card = host on every picture. What it looks like is the operator's to judge; this only catches a broken chain: on a noisy still thing it must take noise out.
+# FSR on camera D's path: 720p class up, flow between the pictures, Lanczos down. Card = host on every picture. What it looks like is the operator's to judge; this only catches a broken chain: on a noisy still thing it must take noise out.
+for n in hold bigbox; do
+    if scripts/scene.sh "$n" 640x480 --frames 60 --fsr 960x720 --fsr-up 1280x960 --fsr-sharp 0.4 >"$s/scene" 2>&1; then pass "$n through FSR, up, flow, Lanczos down: replay identical"; else fail "$n through FSR"; /usr/bin/grep -aE 'replay|refused|no room' "$s/scene" | head -4; fi
+done
+out/host/vt_replay hold 640x480 --frames 80 --fsr 960x720 --fsr-up 1280x960 --fsr-sharp 0.4 >/dev/null 2>"$s/fq" || true
+gain=$(/usr/bin/grep -a fsrcheck "$s/fq" | sed -E 's/.*whole FSR ([0-9.]+) Lanczos ([0-9.]+).*/\1 \2/' | awk '{print $1 - $2}')
+if awk -v g="${gain:-0}" 'BEGIN{exit !(g >= 6)}'; then pass "FSR takes noise out of a still scene: ${gain} dB over a plain Lanczos against the clean truth"; else fail "FSR noise reduction ${gain:-none} dB, under 6"; fi
+# A generated picture is for the eye: a real row is the same to the bit with generation on or off, on the host's lane model, which the scenes above prove equal to the card.
+for spec in "bigbox" "dart" "rotate" "smallbox" "jointed" "dual --dual" "dualbox --dual" "comeback --frames 240"; do
+    n=${spec%% *}; a=(); [[ $spec == *" "* ]] && read -r -a a <<<"${spec#* }"
+    out/host/vt_replay "$n" 640x480 "${a[@]}" >"$s/plain" 2>/dev/null || true
+    out/host/vt_replay "$n" 640x480 "${a[@]}" --framegen 2>/dev/null | /usr/bin/grep -av g >"$s/gen" || true
+    if [[ -s $s/plain ]] && cmp -s "$s/plain" "$s/gen"; then pass "$n: real rows identical with generation on and off ($(wc -l <"$s/plain") rows)"; else fail "$n: generation changed a real row"; fi
+done
 if scripts/scene.sh translate 640x480 --mono --gate >"$s/scene" 2>&1; then pass "scene translate, mode A: tolerances and replay"; else fail "scene translate, mode A"; /usr/bin/grep -aE 'GATE MISS|DIFFERS' "$s/scene" | head -6; fi
 if /usr/bin/grep -aq '"metric_frames":0,' "$s/scene"; then pass "mode A reports no metric output"; else fail "mode A reported metric output"; fi
 

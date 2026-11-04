@@ -34,7 +34,26 @@
 #define VT_GEN_BYTES (VT_GEN_CAMERAS * VT_GEN_SLOTS * VT_GEN_PIC_BYTES)
 #define VT_GEN_OFFSET (VT_PART_BYTES - VT_GEN_BYTES)
 static inline uint64_t vt_gen_offset(uint32_t camera, uint32_t slot) { return VT_GEN_OFFSET + ((uint64_t)camera * VT_GEN_SLOTS + slot) * VT_GEN_PIC_BYTES; }
-#define VT_FRAME_AREA (VT_PART_BYTES - VT_FRAME_OFFSET - VT_GEN_BYTES)
+/* Pictures from FSR, one camera, under the generated ones: two a real frame, held until their moment comes. */
+#define VT_FSR_SLOTS 8
+#define VT_FSR_PIC_BYTES (4ull << 20)
+#define VT_FSR_BYTES (VT_FSR_SLOTS * VT_FSR_PIC_BYTES)
+#define VT_FSR_OFFSET (VT_GEN_OFFSET - VT_FSR_BYTES)
+static inline uint64_t vt_fsr_offset(uint32_t slot) { return VT_FSR_OFFSET + (uint64_t)slot * VT_FSR_PIC_BYTES; }
+/* The orange vectors over those pictures: one plane a real frame, brought down with them, paired by instance when the picture is drawn. */
+#define VT_VEC_SLOTS 8
+#define VT_VEC_PIC_BYTES (2ull << 20)
+#define VT_VEC_BYTES (VT_VEC_SLOTS * VT_VEC_PIC_BYTES)
+#define VT_VEC_OFFSET (VT_FSR_OFFSET - VT_VEC_BYTES)
+static inline uint64_t vt_vec_offset(uint32_t slot) { return VT_VEC_OFFSET + (uint64_t)slot * VT_VEC_PIC_BYTES; }
+/* L and R's vectors, a frame at a time, apart from the map: found by instant when a picture comes due. */
+#define VT_CELL_CAMERAS 2
+#define VT_CELL_SLOTS 8
+#define VT_CELL_SLOT_BYTES (512ull << 10)
+#define VT_CELLS_BYTES (VT_CELL_CAMERAS * VT_CELL_SLOTS * VT_CELL_SLOT_BYTES)
+#define VT_CELLS_OFFSET (VT_VEC_OFFSET - VT_CELLS_BYTES)
+static inline uint64_t vt_cells_offset(uint32_t camera, uint32_t slot) { return VT_CELLS_OFFSET + ((uint64_t)camera * VT_CELL_SLOTS + slot) * VT_CELL_SLOT_BYTES; }
+#define VT_FRAME_AREA (VT_PART_BYTES - VT_FRAME_OFFSET - VT_GEN_BYTES - VT_FSR_BYTES - VT_VEC_BYTES - VT_CELLS_BYTES)
 
 #define VT_MAX_LEVELS 6
 #define VT_MAX_FEATURES 512
@@ -96,6 +115,13 @@ struct vt_config {
     uint32_t framegen;       /* 1: a frame is generated between real frames for the tracker of a camera with a region */
     uint32_t gen_pictures;   /* 1, with framegen: every camera's every generated frame is made whether a region exists or not, and its picture sent to the host before its result */
     float motion_grey;       /* a cell whose mean |frame - mean| is above this, in 8-bit grey, has changed: what a vector cannot see on a flat surface */
+    uint32_t fsr_camera;     /* 1 + the camera whose picture goes through FSR 3 (src/kern/fsr3.h), with framegen. 0 = none */
+    uint32_t fsr_w, fsr_h;   /* its size afterwards */
+    uint32_t fsr_up_w, fsr_up_h; /* a first stage up to this, then a second down to fsr_w x fsr_h. 0 = one stage */
+    uint32_t fsr_async;      /* 1: FSR runs on hardware threads of its own and drops frames when it is behind, and its pictures go by fsr_pub. 0: in line, and every frame: what the gates compare */
+    uint32_t gen_cameras;    /* bit k: camera k gets generated pictures. 0 = all */
+    float fsr_sharp;         /* RCAS, stops: 0 the sharpest */
+    uint32_t vec_overlay;    /* 1: with fsr_async, the orange vectors of FSR's camera run on the core nothing else uses, and are drawn at the upscaled size before the second stage */
 };
 
 #define VT_MAX_CAMERAS 3
@@ -132,6 +158,7 @@ enum vt_sc_key {
     VT_SC_NONE, VT_SC_FB_MAX, VT_SC_MAX_ITER, VT_SC_EPS, VT_SC_MIN_EIG, VT_SC_MAX_RESIDUAL, VT_SC_MAX_FEATURES, VT_SC_Q_ACCEL, VT_SC_R_FLOOR, VT_SC_SIGMA_C, VT_SC_SIGMA_D,
     VT_SC_PREFETCH, VT_SC_MAX_MISSING, VT_SC_REACQ_NCC, VT_SC_CONTRAST, VT_SC_PRE_GAUSS,
     VT_SC_DEBUG_LEVEL, /* -1 off, or a pyramid level: the card sends that plane of its own memory with every result, to the transfer area. For looking, not for production. */
+    VT_SC_FSR_SHARP, /* RCAS, stops: the camera going through FSR, at any moment */
     VT_SC_COUNT
 };
 
@@ -169,6 +196,30 @@ enum vt_exception { VT_EXC_NONE, VT_EXC_BAD_CHECK, VT_EXC_BAD_TYPE, VT_EXC_BAD_S
 
 #define VT_DESC_RING 256
 
+/* Two pictures from FSR made on their own time: a real instant's, and the one half way from the last. */
+struct vt_fsr_meta {
+    uint64_t instance;
+    uint32_t slot, slot_mid, w, h;
+    uint32_t pad[10];
+};
+_Static_assert(sizeof(struct vt_fsr_meta) == 64, "one line");
+
+/* The orange vectors of one real frame, brought down: rows y0 to y1 of a slot are written, the others are zero and are not sent. */
+struct vt_vec_meta {
+    uint64_t instance;
+    uint32_t slot, w, h, y0, y1, lines, threads, pad;
+    uint64_t cycles_vectors, cycles_draw, cycles_down;
+};
+_Static_assert(sizeof(struct vt_vec_meta) == 64, "one line");
+
+/* One frame's vectors of L or R. */
+struct vt_cells_meta {
+    uint64_t instance;
+    uint32_t cam, slot, cols, rows, level;
+    uint32_t pad[9];
+};
+_Static_assert(sizeof(struct vt_cells_meta) == 64, "one line");
+
 struct vt_ctl {
     uint64_t magic;
     /* Session handshake. The host writes config, then session_seq. The card answers card_session = session_seq when it is ready,
@@ -194,6 +245,12 @@ struct vt_ctl {
     volatile uint64_t card_build VT_CACHELINE;   /* HHMMSS of the card program's binary: which code is running */
     volatile uint64_t calib_seq VT_CACHELINE;    /* the host changes calib, then this */
     volatile uint64_t depth_pub VT_CACHELINE;    /* depth maps published: a DMA status, after the map's own copies. The latest is in buffer (depth_pub - 1) & 1 */
+    struct vt_fsr_meta fsr_meta VT_CACHELINE;
+    volatile uint64_t fsr_pub VT_CACHELINE;     /* pictures from FSR published, each with its meta, when it runs apart from the tracker */
+    struct vt_vec_meta vec_meta VT_CACHELINE;
+    volatile uint64_t vec_pub VT_CACHELINE;     /* planes of orange vectors published, each with its meta */
+    struct vt_cells_meta cells_meta[VT_CELL_CAMERAS] VT_CACHELINE;
+    volatile uint64_t cells_pub[VT_CELL_CAMERAS] VT_CACHELINE; /* frames of vectors published, each with its meta */
     struct vt_calib calib VT_CACHELINE;
     struct vt_msg desc[VT_DESC_RING] VT_CACHELINE;
 };
@@ -238,6 +295,9 @@ enum vt_state {
 #define VT_F_3D_REJECTED 64u /* a 3D measurement existed but failed the innovation gate */
 #define VT_F_AMBIGUOUS 128u  /* correspondence too ambiguous for a measurement this frame */
 #define VT_F_GENERATED 256u  /* from a frame generated between two real ones: its instance is the newer real frame's, acq_ns half way. Nothing in it is a measurement */
+#define VT_F_AT_REST 512u    /* the head has not moved since the selection: the box's centre is where the operator drew it, and nothing has yet shown which part of the box is the thing */
+#define VT_F_UNPROVEN 1024u  /* this 3D rests on such a box and the box holds more than one depth, or a view is at rest: its covariance says how little is known, and it is not to be read as a measurement of the thing */
+#define VT_F_POINT_MID 2048u /* the box is plainly not centred on the thing, so the point is the middle of its members: not the same physical spot in another view, to within pt_sx, pt_sy */
 
 /* Per feature. */
 #define VT_FF_STEREO 1u      /* xr, yr, disparity hold a sub-pixel match */
@@ -268,6 +328,8 @@ struct vt_result {
     uint32_t nfeat, nfeat_3d;
     uint32_t exceptions; /* parts of this frame's message that were ignored: 1 << vt_exception */
     float cx, cy, w, h; /* region, left image */
+    float pt_x, pt_y;   /* the point two views triangulate: the box's centre, unless its members say the box is not centred on the thing (VT_F_POINT_MID): then the middle of its members */
+    float pt_sx, pt_sy; /* how well the middle of its members is known, pixels: the scatter of a median. Two views each see their own corners, so this does not average away */
     float du, dv;       /* its displacement this frame: observed frames only */
     float scale;        /* its image scale change this frame */
     float rate_u, rate_v; /* pixels per second: image-plane, never metric */
@@ -278,6 +340,8 @@ struct vt_result {
     float reacq_ncc;    /* unobserved frames: the best correlation with the stored appearance, and where, in pixels of the image */
     float reacq_x, reacq_y;
     uint32_t picture;   /* generated frames: 1 + the slot of this camera's picture (vt_gen_offset); 0 none. It has landed by the time this result is published */
+    uint32_t fsr_slot;  /* 1 + the slot of this instant's picture from FSR (vt_fsr_offset); 0 none. Landed when this result says so */
+    uint32_t fsr_w, fsr_h;
     int32_t debug_level; /* the plane sent with this result, -1 none: its size, and its stride in lanes */
     uint32_t debug_w, debug_h, debug_stride;
     float pair_ua, pair_va; /* two views: camera A's centre as carried to camera B's time */

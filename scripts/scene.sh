@@ -26,7 +26,7 @@ for ((i = 0; i < ${#args[@]}; i++)); do
         --frames) frames=${args[$((i + 1))]} ;;
         --variant | --alternate | --drop | --live | --bad-at) compare=0 ;;
         --dual) perframe=2 ;;
-        --framegen) generated=1 ;;
+        --framegen | --fsr) generated=1 ;;
     esac
 done
 frames=$((frames * perframe))

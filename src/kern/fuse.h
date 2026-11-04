@@ -1,5 +1,5 @@
 /* fuse.h: two independently tracked views of one region, made into one 3D point and one Kalman state. No patch matching between the views and no synchronized shutters: each camera's tracker gives
- * its region's centre at that camera's own time, the older of the two is carried to the newer's time along its measured image rate, both are undistorted to rays, and the rays' closest point
+ * the thing's point at that camera's own time, the older of the two is carried to the newer's time along its measured image rate, both are undistorted to rays, and the rays' closest point
  * is the measurement. Long double, the same on card and host. */
 #ifndef VT_FUSE_H
 #define VT_FUSE_H
@@ -14,9 +14,14 @@ struct fuse {
     struct fuse_obs {
         int valid;
         long double u, v, rate_u, rate_v;
+        long double var_u, var_v; /* how well its point is known: the box's own size, while its head has not moved */
+        int at_rest, mid;
         uint64_t t_ns;
     } obs[2];
     struct kf kf;
+    struct kf_lock lock;
+    int kf_unproven; /* the filter holds what was measured from a box at rest */
+    long double bias[9]; /* the last measure's bias: what the filter cannot average away, added to what it states */
     uint64_t last_meas_ns, last_ns;
     long double sigma_c, r_floor, q_accel, v0_sigma, max_reproj, max_age_s, patience_s;
 };

@@ -114,24 +114,19 @@ void dv_cloud(struct x11view *v, const void *map, const struct vt_calib *cal, in
     }
 }
 
-void dv_vectors(struct x11view *v, const void *map, int cam, int pane_x, int pane_y, int pane_w, int mirror, int all)
+void dv_cells(struct x11view *v, const struct vt_cell *cells, uint32_t cols, uint32_t rows, int flow_level, int pane_x, int pane_y, int pane_w, double view, int mirror, int all)
 {
-    const struct vt_depth_out *h = map;
-    const struct vt_motion *m = &h->cam[cam];
-    if (!m->cols || !m->cell_at)
-        return;
-    const struct vt_cell *cells = vt_depth_cells(map, cam);
-    const int scale = 1 << h->flow_level;
+    const int scale = 1 << flow_level;
     /* Pixels of the level drawn in pixels of the camera, and then made visible: a vector of a quarter of a level's pixel is one pixel of the camera. */
-    const double gain = (double)scale * (all ? 64.0 : 4.0);
-    for (uint32_t r = 0; r < m->rows; r++)
-        for (uint32_t c = 0; c < m->cols; c++) {
-            const struct vt_cell *e = &cells[r * m->cols + c];
+    const double gain = (double)scale * view * (all ? 64.0 : 4.0);
+    for (uint32_t r = 0; r < rows; r++)
+        for (uint32_t c = 0; c < cols; c++) {
+            const struct vt_cell *e = &cells[r * cols + c];
             const int good = (e->state & VT_CELL_LK) == 0, changed = (e->state & VT_CELL_CHANGED) != 0;
             if (!(all ? good : changed))
                 continue;
-            int x0 = (int)(c * VT_CELL_W + VT_CELL_W / 2) * scale;
-            const int y0 = (int)(r * VT_CELL_H + VT_CELL_H / 2) * scale;
+            int x0 = (int)((double)((int)(c * VT_CELL_W + VT_CELL_W / 2) * scale) * view);
+            const int y0 = (int)((double)((int)(r * VT_CELL_H + VT_CELL_H / 2) * scale) * view);
             double du = good ? (double)e->u * gain : 0.0;
             const double dv = good ? (double)e->v * gain : 0.0;
             if (mirror) {
@@ -142,6 +137,14 @@ void dv_vectors(struct x11view *v, const void *map, int cam, int pane_x, int pan
             x11view_line(v, pane_x + x0, pane_y + y0, pane_x + x0 + (int)du, pane_y + y0 + (int)dv, colour);
             x11view_fill(v, pane_x + x0 - 1, pane_y + y0 - 1, 3, 3, colour);
         }
+}
+
+void dv_vectors(struct x11view *v, const void *map, int cam, int pane_x, int pane_y, int pane_w, double view, int mirror, int all)
+{
+    const struct vt_depth_out *h = map;
+    const struct vt_motion *m = &h->cam[cam];
+    if (m->cols && m->cell_at)
+        dv_cells(v, vt_depth_cells(map, cam), m->cols, m->rows, (int)h->flow_level, pane_x, pane_y, pane_w, view, mirror, all);
 }
 
 int dv_save(const void *map, const struct vt_calib *cal, const char *prefix)

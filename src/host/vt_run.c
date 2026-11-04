@@ -50,9 +50,11 @@ static void *recv_main(void *arg)
             memcpy(o, src, head);
             memcpy(o->feat, src + head, (size_t)o->nfeat * sizeof(struct vt_feat_out));
             r->t_recv[i] = t;
+            if (o->fsr_slot)
+                r->pic_hash[i] ^= vt_fnv(VT_FNV_INIT, r->l->part + vt_fsr_offset(o->fsr_slot - 1), (size_t)o->fsr_w * o->fsr_h);
             if (o->picture) {
                 const size_t bytes = o->hdr.camera == 0 ? (size_t)r->cfg->width * r->cfg->height : (size_t)r->cfg->width2 * r->cfg->height2;
-                r->pic_hash[i] = vt_fnv(VT_FNV_INIT, r->l->part + vt_gen_offset(o->hdr.camera, o->picture - 1), bytes);
+                r->pic_hash[i] ^= vt_fnv(VT_FNV_INIT, r->l->part + vt_gen_offset(o->hdr.camera, o->picture - 1), bytes);
             }
         }
         have = pub;
@@ -193,8 +195,9 @@ int main(int argc, char **argv)
             copy.hdr.slot = 0;
             copy.frames_skipped = 0;
             copy.picture = 0;
+            copy.fsr_slot = 0;
             memset(copy.cycles, 0, sizeof copy.cycles);
-            fprintf(hf, "%d %016llx\n", fi, (unsigned long long)(vt_fnv(VT_FNV_INIT, &copy, bytes) ^ pic_hash[r]));
+            fprintf(hf, (x->flags & VT_F_GENERATED) ? "%dg %016llx\n" : "%d %016llx\n", fi, (unsigned long long)(vt_fnv(VT_FNV_INIT, &copy, bytes) ^ pic_hash[r]));
         }
         const int key = fi * cams + (int)x->hdr.camera;
         const double lat_us = key < nmsg && t_pub[key] ? (double)(t_recv[r] - t_pub[key]) * 1e-3 : 0.0;

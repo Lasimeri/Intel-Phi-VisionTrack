@@ -9,7 +9,7 @@
  * It outlives the card program: a rebuilt vtrackd (scripts/live.sh restarts it) only costs a banner, then the session comes back and the regions are selected again where they were. While
  * out/run/bench.lock exists a benchmark owns the card: this program leaves the region alone and shows the cameras with a banner.
  *
- *   vt_view [--dev D] [--size WxH] [--fps F] [--dev2 D] [--size2 WxH] [--fps2 F] [--dev3 D] [--size3 WxH] [--fps3 F] [--cams 1|2|3] [--at X,Y] [--cores C] [--tpc T] [--levels L] [--feat N]
+ *   vt_view [--dev D] [--size WxH] [--fps F] [--dev2 D] [--size2 WxH] [--fps2 F] [--dev3 D] [--size3 WxH] [--fps3 F]  [--rate F] [--rate2 F] [--rate3 F] [--cams 1|2|3] [--at X,Y] [--cores C] [--tpc T] [--levels L] [--feat N]
  *   Keys: drag select a region in any view; right click or d deselect; v next view (camera, then the card's own pyramid planes); c contrast; g blur; [ ] feature budget; m mirror the display; q quit
  *   Orders from out/run/view.cmd, one line, consumed when read: "select CAM X Y W H", "deselect", "view N", "snap N" (N distinct frames summed per camera into out/run/snap-{a,b}.pgm, 16 bits), "map" (the newest depth map into out/run/map.{bin,pgm,ply}).
  *
@@ -70,8 +70,13 @@ struct shown {
 };
 
 struct cam {
+    double vs;        /* how much bigger than the camera its pane is: 1, or FSR's */
+    int vw, vh;       /* its pane */
+    struct vt_result *row_at; /* FSR's camera: each recent instant's result, real then generated, waiting for its picture */
     const char *dev;
-    int w, h, fps;
+    int w, h, fps;          /* what the device is asked for */
+    double rate;            /* frames a second kept of those: the operator's order, 2026-11-03. Each is half of what is shown */
+    uint64_t next_ns, skipped; /* when the next one to keep is due; how many have been let go */
     uint8_t *ring;
     uint64_t acq[RING];
     uint64_t captured;      /* distinct frames so far */
@@ -119,6 +124,16 @@ static struct {
     int ncam, levels, feat, cores, tpc, quit;
     uint32_t sc_key;
     float sc_value;
+    int fsr, fsr_cam, fsr_sharp_new, lr_gen; /* camera D through FSR, in its pane; L and R generated pictures beside it */
+    /* The orange vectors, drawn at FSR's upscaled size on the card's spare core and brought down with its pictures: each slot's instant and which rows it has. */
+    int vec;
+    struct vec_plane { uint64_t instance; uint32_t y0, y1, w, valid; } vec_at[VT_VEC_SLOTS];
+    struct vt_vec_meta vec_last;
+    uint64_t vec_count;
+    /* L and R's vectors, a frame at a time, each slot's instant. */
+    struct cells_plane { uint64_t instance; uint32_t cols, rows, level, valid; } cells_at[VT_CELL_CAMERAS][VT_CELL_SLOTS];
+    uint64_t cells_count[VT_CELL_CAMERAS];
+    float fsr_sharp;
     int contrast, pre_gauss, view_level, mirror;
     uint32_t pair_epoch; /* changes at every selection: pairs from different selections are not one object's path */
     pthread_mutex_t m;
@@ -137,6 +152,7 @@ static struct {
     int map_i, depth_avg, depth_planes, vectors_all, save_map, flow_level, session_restart, framegen;
     uint64_t map_seq;
     struct rate map_rate;
+    struct rate cells_rate[VT_CELL_CAMERAS];
 } A;
 
 static uint8_t map_store[2][VT_DEPTH_BYTES] __attribute__((aligned(64)));
@@ -214,6 +230,15 @@ static void *capture_main(void *arg)
             last_hash = h;
             if (__atomic_load_n(&k->integ_left, __ATOMIC_ACQUIRE) > 0)
                 integrate_frame(k, dst);
+            /* Kept by when it was taken, not by counting: the rate holds if the device slips. Within half a device frame of its time is its time. */
+            if (k->rate < (double)k->fps) {
+                const uint64_t period = (uint64_t)(1e9 / k->rate), half = 500000000ull / (uint64_t)k->fps;
+                if (acq + half < k->next_ns) {
+                    k->skipped++;
+                    continue;
+                }
+                k->next_ns = k->next_ns && acq < k->next_ns + period ? k->next_ns + period : acq + period;
+            }
             k->acq[i % RING] = acq;
             __atomic_store_n(&k->captured, i + 1, __ATOMIC_RELEASE);
         } else if (r == 0) {
@@ -246,7 +271,7 @@ static void session_config(struct vt_config *c)
     c->tpc = (uint32_t)A.tpc;
     c->levels = (uint32_t)A.levels;
     c->max_features = (uint32_t)A.feat;
-    c->max_missing = (uint32_t)A.c[0].fps * 2;
+    c->max_missing = (uint32_t)(A.c[0].rate * 2.0);
     c->contrast = (uint32_t)A.contrast;
     c->pre_gauss = (uint32_t)A.pre_gauss;
     c->slots = SLOTS;
@@ -279,19 +304,32 @@ static void session_config(struct vt_config *c)
         c->flow_level = (uint32_t)A.flow_level;
         c->framegen = (uint32_t)A.framegen;
         c->gen_pictures = (uint32_t)A.framegen;
+        /* 720p12.5 up to 1440p by FSR, doubled to 25 a second by the flow from the pictures, and a Lanczos to 1080p: the user's order, 2026-11-03. */
+        if (A.fsr && A.framegen) {
+            c->fsr_camera = 3;
+            c->fsr_up_w = 2u * (uint32_t)A.c[2].w;
+            c->fsr_up_h = 2u * (uint32_t)A.c[2].h;
+            c->fsr_w = 3u * (uint32_t)A.c[2].w / 2u;
+            c->fsr_h = 3u * (uint32_t)A.c[2].h / 2u;
+            c->fsr_sharp = A.fsr_sharp;
+            c->vec_overlay = (uint32_t)A.vec;
+            c->fsr_async = 1;
+            /* L and R's generated pictures are only for the eye: the tracker never reads them. --lr-gen 0 gives their time to FSR. */
+            c->gen_cameras = A.lr_gen ? 0u : 1u << 2;
+        }
     }
 }
 
 /* A correspondence: both regions observed, camera L's centre carried to the other camera's time along its rate. */
 static void note_pair(FILE *f, const struct vt_result *a, const struct vt_result *b, double *last)
 {
-    if (a->state != VT_ST_OBSERVED || b->state != VT_ST_OBSERVED)
+    if (a->state != VT_ST_OBSERVED || b->state != VT_ST_OBSERVED || ((a->flags | b->flags) & VT_F_AT_REST))
         return;
     const double gap = ((double)b->hdr.acq_ns - (double)a->hdr.acq_ns) * 1e-9;
     if (gap > 0.04 || gap < -0.04)
         return;
-    const double xa = (double)a->cx + (double)a->rate_u * gap, ya = (double)a->cy + (double)a->rate_v * gap;
-    const double xb = (double)b->cx, yb = (double)b->cy;
+    const double xa = (double)a->pt_x + (double)a->rate_u * gap, ya = (double)a->pt_y + (double)a->rate_v * gap;
+    const double xb = (double)b->pt_x, yb = (double)b->pt_y;
     /* Only a real change of place adds information. */
     if ((xa - last[0]) * (xa - last[0]) + (ya - last[1]) * (ya - last[1]) + (xb - last[2]) * (xb - last[2]) + (yb - last[3]) * (yb - last[3]) < 36.0)
         return;
@@ -305,9 +343,9 @@ static void note_pair(FILE *f, const struct vt_result *a, const struct vt_result
 }
 
 /* The picture of the result just merged into K->last, due at its own instant plus this camera's delay: the 95th percentile of how late pictures arrive, measured. A generated picture is the latest to arrive against its own instant, half a frame plus the card's time, so with generation on the delay is about that, and with it off it falls by itself to the card's time alone. At most 2.5 frames: a slot of the part is written again after three. */
-static void show_push(struct cam *K, const uint8_t *pic, int generated)
+static void show_push(struct cam *K, const struct vt_result *r, const uint8_t *pic, int generated)
 {
-    const uint64_t now = vt_now_ns(), acq = K->last.hdr.acq_ns;
+    const uint64_t now = vt_now_ns(), acq = r->hdr.acq_ns;
     K->arrive_us[K->arrivals % ARRIVALS] = now > acq ? (uint32_t)((now - acq) / 1000u) : 0u;
     K->arrivals++;
     if (K->arrivals >= ARRIVALS && (K->arrivals & 15u) == 0u) {
@@ -319,7 +357,7 @@ static void show_push(struct cam *K, const uint8_t *pic, int generated)
                 s[at] = s[at - 1];
             s[at] = v;
         }
-        const uint64_t most = K->fps > 0 ? 2500000000ull / (uint64_t)K->fps : 100000000ull, want = (uint64_t)s[ARRIVALS * 19 / 20] * 1000u + SHOW_MARGIN_NS;
+        const uint64_t most = K->rate > 0.0 ? (uint64_t)(2.5e9 / K->rate) : 100000000ull, want = (uint64_t)s[ARRIVALS * 19 / 20] * 1000u + SHOW_MARGIN_NS;
         K->delay_ns = want < most ? want : most;
     }
     struct shown *s = &K->q[K->q_in % SHOW_Q];
@@ -327,7 +365,7 @@ static void show_push(struct cam *K, const uint8_t *pic, int generated)
     s->recv_ns = now;
     s->pic = pic;
     s->generated = generated;
-    memcpy(&s->r, &K->last, offsetof(struct vt_result, feat) + (size_t)K->last.nfeat * sizeof(struct vt_feat_out));
+    memcpy(&s->r, r, offsetof(struct vt_result, feat) + (size_t)r->nfeat * sizeof(struct vt_feat_out));
     K->q_in++;
     if (K->q_in - K->q_out > SHOW_Q) {
         K->q_out = K->q_in - SHOW_Q;
@@ -345,7 +383,8 @@ static void *link_main(void *arg)
     float resume_roi[VT_MAX_CAMERAS][4];
     int resume[VT_MAX_CAMERAS] = {0, 0, 0}, debug_sent = -1;
     FILE *pf[VT_MAX_CAMERAS] = {NULL, NULL, NULL}, *track_csv = NULL, *depth_csv = NULL;
-    uint64_t depth_seen = 0;
+    uint64_t fsr_seen = 0, depth_seen = 0, vec_seen = 0;
+    uint64_t cells_seen[VT_CELL_CAMERAS] = {0, 0};
     unsigned depth_lines = 0;
     double pair_last[VT_MAX_CAMERAS][4];
     for (int k = 0; k < VT_MAX_CAMERAS; k++)
@@ -380,6 +419,8 @@ static void *link_main(void *arg)
             seq = c->session_seq;
             active = 1;
             pub = seen = depth_seen = 0;
+            vec_seen = 0;
+            cells_seen[0] = cells_seen[1] = 0;
             stride = vt_slot_stride(&cfg);
             for (int k = 0; k < A.ncam; k++)
                 sent[k] = __atomic_load_n(&A.c[k].captured, __ATOMIC_ACQUIRE);
@@ -462,6 +503,11 @@ static void *link_main(void *arg)
                         A.sc_key = VT_SC_NONE;
                     }
                 }
+                if (k == A.fsr_cam && A.fsr_sharp_new) {
+                    m.sc_key = VT_SC_FSR_SHARP;
+                    m.sc_value = A.fsr_sharp;
+                    A.fsr_sharp_new = 0;
+                }
                 pthread_mutex_unlock(&A.m);
                 m.check = vt_msg_check(&m);
                 c->desc[pub % VT_DESC_RING] = m;
@@ -484,7 +530,7 @@ static void *link_main(void *arg)
             const struct vt_result *fresh = (const struct vt_result *)src;
             const int generated = (fresh->flags & VT_F_GENERATED) != 0;
             if (generated) {
-                /* A generated frame moves the region and its features and measures nothing: what is known in 3D stays as the last real frame left it. */
+                /* A generated frame measures nothing: its box and features lie between the two real frames around it, and what is known in 3D stays as the last real frame left it. */
                 K->last.state = fresh->state;
                 K->last.flags |= VT_F_GENERATED;
                 K->last.hdr.acq_ns = fresh->hdr.acq_ns;
@@ -493,6 +539,8 @@ static void *link_main(void *arg)
                 K->last.cy = fresh->cy;
                 K->last.w = fresh->w;
                 K->last.h = fresh->h;
+                K->last.pt_x = fresh->pt_x;
+                K->last.pt_y = fresh->pt_y;
                 K->last.rate_u = fresh->rate_u;
                 K->last.rate_v = fresh->rate_v;
                 K->last.inliers = fresh->inliers;
@@ -505,12 +553,16 @@ static void *link_main(void *arg)
             K->results++;
             K->generated += generated;
             K->recv_ns = vt_now_ns();
+            /* FSR's camera: the picture comes later and on its own; what was known of that instant waits for it. */
+            if (K->row_at) {
+                memcpy(&K->row_at[(K->last.hdr.instance & 15u) * 2u + (generated != 0)], &K->last, offsetof(struct vt_result, feat) + (size_t)K->last.nfeat * sizeof(struct vt_feat_out));
+            } else
             /* What this result is a picture of: a generated picture from the part, a real one from this window's ring, where its place travelled with the frame. */
             if (generated) {
                 if (fresh->picture)
-                    show_push(K, A.l.part + vt_gen_offset(k, fresh->picture - 1), 1);
+                    show_push(K, &K->last, A.l.part + vt_gen_offset(k, fresh->picture - 1), 1);
             } else {
-                show_push(K, K->ring + (K->last.hdr.pub_ns % RING) * (size_t)K->w * (size_t)K->h, 0);
+                show_push(K, &K->last, K->ring + (K->last.hdr.pub_ns % RING) * (size_t)K->w * (size_t)K->h, 0);
             }
             A.exceptions = c->exceptions;
             /* Every 3D result, as the card computed it: what any claim about the live numbers is measured from, not what a screen showed. */
@@ -545,6 +597,51 @@ static void *link_main(void *arg)
             }
             pthread_mutex_unlock(&A.m);
             did = 1;
+        }
+        /* Two pictures from FSR when they are ready, each due at its own instant: 30 a second from 15. */
+        const uint64_t fp = c->fsr_pub;
+        if (A.fsr && fp != fsr_seen) {
+            fsr_seen = fp;
+            const uint32_t fslot = c->fsr_meta.slot, fmid = c->fsr_meta.slot_mid;
+            const uint64_t finst = c->fsr_meta.instance;
+            struct cam *F = &A.c[A.fsr_cam];
+            const struct vt_result *row_real = &F->row_at[(finst & 15u) * 2u], *row_mid = &F->row_at[(finst & 15u) * 2u + 1u];
+            pthread_mutex_lock(&A.m);
+            if (fslot < VT_FSR_SLOTS && fmid < VT_FSR_SLOTS && row_real->hdr.instance == finst) {
+                if (row_mid->hdr.instance == finst)
+                    show_push(F, row_mid, A.l.part + vt_fsr_offset(fmid), 1);
+                show_push(F, row_real, A.l.part + vt_fsr_offset(fslot), 0);
+            }
+            pthread_mutex_unlock(&A.m);
+        }
+        /* A frame's vectors of L or R, likewise. */
+        for (int cv = 0; A.vec && cv < VT_CELL_CAMERAS; cv++) {
+            const uint64_t cp = c->cells_pub[cv];
+            if (cp == cells_seen[cv])
+                continue;
+            cells_seen[cv] = cp;
+            struct vt_cells_meta cm;
+            memcpy(&cm, &c->cells_meta[cv], sizeof cm);
+            if (cm.slot < VT_CELL_SLOTS) {
+                pthread_mutex_lock(&A.m);
+                A.cells_at[cv][cm.slot] = (struct cells_plane){cm.instance, cm.cols, cm.rows, cm.level, 1u};
+                A.cells_count[cv]++;
+                pthread_mutex_unlock(&A.m);
+            }
+        }
+        /* A real frame's orange vectors, in a slot of their own: found by instant when its picture comes due. */
+        const uint64_t vp = c->vec_pub;
+        if (A.vec && vp != vec_seen) {
+            vec_seen = vp;
+            struct vt_vec_meta vm;
+            memcpy(&vm, &c->vec_meta, sizeof vm);
+            if (vm.slot < VT_VEC_SLOTS) {
+                pthread_mutex_lock(&A.m);
+                A.vec_at[vm.slot] = (struct vec_plane){vm.instance, vm.y0, vm.y1, vm.w, 1u};
+                A.vec_last = vm;
+                A.vec_count++;
+                pthread_mutex_unlock(&A.m);
+            }
         }
         /* The newest map, whole: the card wrote every byte of this buffer before it wrote the word that names it. */
         const uint64_t dp = c->depth_pub;
@@ -693,8 +790,9 @@ static void draw_view(struct x11view *v, int ox, int oy, const struct cam *K, co
     if (!has_region)
         return;
     const int pred = (r->flags & VT_F_PREDICTED) != 0;
-    const int ex0 = show_x(ox, K->w, (double)(r->cx - 0.5f * r->w)), ex1 = show_x(ox, K->w, (double)(r->cx + 0.5f * r->w));
-    const int x0 = ex0 < ex1 ? ex0 : ex1, x1 = ex0 < ex1 ? ex1 : ex0, y0 = oy + (int)(r->cy - 0.5f * r->h), y1 = oy + (int)(r->cy + 0.5f * r->h);
+    const double s = K->vs;
+    const int ex0 = show_x(ox, K->vw, (double)(r->cx - 0.5f * r->w) * s), ex1 = show_x(ox, K->vw, (double)(r->cx + 0.5f * r->w) * s);
+    const int x0 = ex0 < ex1 ? ex0 : ex1, x1 = ex0 < ex1 ? ex1 : ex0, y0 = oy + (int)((double)(r->cy - 0.5f * r->h) * s), y1 = oy + (int)((double)(r->cy + 0.5f * r->h) * s);
     outline_line(v, x0, y0, x1, y0, WHITE, pred);
     outline_line(v, x1, y0, x1, y1, WHITE, pred);
     outline_line(v, x1, y1, x0, y1, WHITE, pred);
@@ -704,9 +802,9 @@ static void draw_view(struct x11view *v, int ox, int oy, const struct cam *K, co
     text_outlined(v, x0, y0 - 20 < oy ? y0 + 4 : y0 - 20, 2, WHITE, tag);
     for (unsigned k = 0; k < r->nfeat; k++) {
         const struct vt_feat_out *f = &r->feat[k];
-        const int fx = show_x(ox, K->w, (double)f->x), fy = oy + (int)f->y;
+        const int fx = show_x(ox, K->vw, (double)f->x * s), fy = oy + (int)((double)f->y * s);
         /* A vector eight times its length, from where the feature was: a pixel of motion is visible. */
-        outline_line(v, fx, fy, show_x(ox, K->w, (double)(f->x - 8.0f * f->u)), fy - (int)(8.0f * f->v), GREY, 0);
+        outline_line(v, fx, fy, show_x(ox, K->vw, (double)(f->x - 8.0f * f->u) * s), fy - (int)((double)(8.0f * f->v) * s), GREY, 0);
         x11view_fill(v, fx - 2, fy - 2, 5, 5, BLACK);
         x11view_fill(v, fx - 1, fy - 1, 3, 3, (f->flags & VT_FF_MEMBER) ? WHITE : GREY);
     }
@@ -715,7 +813,7 @@ static void draw_view(struct x11view *v, int ox, int oy, const struct cam *K, co
 /* The epipolar line: where a point seen in one camera must lie in the other, if the calibration is right. A check anyone can read off the screen. */
 static void draw_epipolar(struct x11view *v, const struct vt_calib *c, const struct vt_result *a, const double *R, const double *T, double fb, double cxb, double cyb, const struct cam *B, int ox, int oy)
 {
-    const double ax = ((double)a->cx - c->cxa) / c->fa, ay = ((double)a->cy - c->cya) / c->fa;
+    const double ax = ((double)a->pt_x - c->cxa) / c->fa, ay = ((double)a->pt_y - c->cya) / c->fa;
     const double p[3] = {R[0] * ax + R[1] * ay + R[2], R[3] * ax + R[4] * ay + R[5], R[6] * ax + R[7] * ay + R[8]};
     /* T x p, in normalized coordinates of B: l0 x + l1 y + l2 = 0. */
     const double l0 = T[1] * p[2] - T[2] * p[1], l1 = T[2] * p[0] - T[0] * p[2], l2 = T[0] * p[1] - T[1] * p[0];
@@ -733,7 +831,7 @@ static void draw_epipolar(struct x11view *v, const struct vt_calib *c, const str
             continue;
         }
         if (have)
-            x11view_dash(v, show_x(ox, B->w, x0), oy + y0, show_x(ox, B->w, xp), oy + yp, GREY, 3, 5);
+            x11view_dash(v, show_x(ox, B->vw, x0 * B->vs), oy + (int)(y0 * B->vs), show_x(ox, B->vw, xp * B->vs), oy + (int)(yp * B->vs), GREY, 3, 5);
         have = 1;
         x0 = xp;
         y0 = yp;
@@ -799,6 +897,21 @@ static struct pane pane[VT_MAX_CAMERAS], depth_pane, panel;
 
 static void layout(int *win_w, int *win_h)
 {
+    for (int k = 0; k < A.ncam; k++) {
+        A.c[k].vs = 1.0;
+        A.c[k].vw = A.c[k].w;
+        A.c[k].vh = A.c[k].h;
+    }
+    /* Camera D as FSR makes it: half as big again, and its pane with it. */
+    const int with_fsr = A.fsr && A.framegen && A.ncam == 3;
+    if (with_fsr) {
+        A.c[2].vs = 1.5;
+        A.c[2].vw = 3 * A.c[2].w / 2;
+        A.c[2].vh = 3 * A.c[2].h / 2;
+        A.c[2].row_at = calloc(32, sizeof(struct vt_result));
+        if (!A.c[2].row_at)
+            exit(2);
+    }
     const struct cam *a = &A.c[0], *b = &A.c[1], *c = &A.c[2];
     pane[0] = (struct pane){0, 0, a->w, a->h};
     if (A.ncam == 1) {
@@ -812,9 +925,14 @@ static void layout(int *win_w, int *win_h)
     if (A.ncam == 2) {
         panel = (struct pane){0, top, total, 720};
     } else {
-        pane[2] = (struct pane){0, top, c->w, c->h};
-        depth_pane = (struct pane){c->w, top, c->w, c->h};
-        panel = (struct pane){2 * c->w, top, total - 2 * c->w, c->h};
+        pane[2] = (struct pane){0, top, c->vw, c->vh};
+        if (with_fsr) {
+            depth_pane = (struct pane){c->vw, top, c->w / 2, c->h / 2};
+            panel = (struct pane){c->vw + c->w / 2, top, total - c->vw - c->w / 2, c->vh};
+        } else {
+            depth_pane = (struct pane){c->w, top, c->w, c->h};
+            panel = (struct pane){2 * c->w, top, total - 2 * c->w, c->h};
+        }
     }
     *win_w = total;
     *win_h = top + panel.h;
@@ -1199,18 +1317,21 @@ int main(int argc, char **argv)
     a->w = 1920;
     a->h = 1080;
     a->fps = 30;
+    a->rate = 24.0;
     b->dev = devs[1];
     b->name = "R  NexiGo";
     b->w = 1920;
     b->h = 1080;
     b->fps = 30;
+    b->rate = 24.0;
     d->dev = devs[2];
     d->name = "D  C310";
     d->w = 1280;
     d->h = 720;
     /* The rates are the user's, 11-03. In MJPEG this camera claims its largest alternate setting at any frame rate, so it must not share a USB 2 bus with the NexiGo, which does the same: STREAMON
      * answers ENOSPC. Measured at 720p15 and 1080p30 on one bus; solved by the two being on different controllers. */
-    d->fps = 15;
+    d->fps = 25;
+    d->rate = 12.5; /* every second frame of its own 25: even, 80 ms, where 12.5 of 15 would leave a gap of 133 */
     A.ncam = 3;
     A.mirror = 1;
     A.levels = 5;
@@ -1222,6 +1343,11 @@ int main(int argc, char **argv)
     /* Half of native: the user's choice, 2026-11-03, native being laggy to use though it holds its frame rate (capture to result 47.5 ms, here 35.4). docs/measurements.md. */
     A.flow_level = 1;
     A.framegen = 1;
+    A.fsr = 1;
+    A.lr_gen = 1; /* 60, 60 and 29 a second with FSR running, measured 2026-11-03: --lr-gen 0 gives the card back if it is ever short */
+    A.fsr_sharp = 0.4f; /* AMD: (1 - 0.8) x 2 stops, its sample's default */
+    A.vec = 1;
+    A.fsr_cam = 2;
     int at_x = -1, at_y = -1;
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--dev") && i + 1 < argc) a->dev = argv[++i];
@@ -1233,6 +1359,9 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--dev3") && i + 1 < argc) d->dev = argv[++i];
         else if (!strcmp(argv[i], "--size3") && i + 1 < argc) sscanf(argv[++i], "%dx%d", &d->w, &d->h);
         else if (!strcmp(argv[i], "--fps3") && i + 1 < argc) d->fps = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--rate") && i + 1 < argc) a->rate = atof(argv[++i]);
+        else if (!strcmp(argv[i], "--rate2") && i + 1 < argc) b->rate = atof(argv[++i]);
+        else if (!strcmp(argv[i], "--rate3") && i + 1 < argc) d->rate = atof(argv[++i]);
         else if (!strcmp(argv[i], "--raw3") && i + 1 < argc) d->yuyv = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--cams") && i + 1 < argc) A.ncam = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--at") && i + 1 < argc) sscanf(argv[++i], "%d,%d", &at_x, &at_y);
@@ -1243,6 +1372,10 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--avg") && i + 1 < argc) A.depth_avg = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--flow") && i + 1 < argc) A.flow_level = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--framegen") && i + 1 < argc) A.framegen = atoi(argv[++i]) != 0;
+        else if (!strcmp(argv[i], "--fsr") && i + 1 < argc) A.fsr = atoi(argv[++i]) != 0;
+        else if (!strcmp(argv[i], "--lr-gen") && i + 1 < argc) A.lr_gen = atoi(argv[++i]) != 0;
+        else if (!strcmp(argv[i], "--vec") && i + 1 < argc) A.vec = atoi(argv[++i]) != 0;
+        else if (!strcmp(argv[i], "--noframe")) x11view_noframe(1);
         else if (!strcmp(argv[i], "--planes") && i + 1 < argc) A.depth_planes = atoi(argv[++i]);
         else {
             fprintf(stderr, "vt_view: unknown option %s\n", argv[i]);
@@ -1295,6 +1428,14 @@ int main(int argc, char **argv)
     double lat_med = 0.0, lat_p95 = 0.0, place_t = 0.0, last_draw = 0.0, last_panel = 0.0, draw_ms = 0.0, present_ms = 0.0;
     double last_shown[VT_MAX_CAMERAS] = {0.0, 0.0, 0.0}, delay_ms[VT_MAX_CAMERAS] = {0.0, 0.0, 0.0};
     const uint8_t *show_pic[VT_MAX_CAMERAS] = {NULL, NULL, NULL};
+    const uint8_t *show_cover = NULL;
+    const struct vt_cell *show_cells[VT_CELL_CAMERAS] = {NULL, NULL};
+    struct cells_plane show_cell_at[VT_CELL_CAMERAS] = {{0, 0, 0, 0, 0}, {0, 0, 0, 0, 0}};
+    FILE *rates_csv = NULL;
+    double rates_t = 0.0;
+    struct vec_plane show_lines = {0, 0, 0, 0, 0};
+    uint64_t vec_count_was = 0;
+    double vec_t_was = 0.0, vec_rate = 0.0;
     int show_made[VT_MAX_CAMERAS] = {0, 0, 0};
     FILE *shown_csv = NULL;
     unsigned shown_lines = 0;
@@ -1325,10 +1466,12 @@ int main(int argc, char **argv)
                 if (xb - xa >= 16 && yb - ya >= 16) {
                     pthread_mutex_lock(&A.m);
                     A.c[drag_cam].cmd = VT_CMD_SELECT;
-                    A.c[drag_cam].roi[0] = (float)xa;
-                    A.c[drag_cam].roi[1] = (float)ya;
-                    A.c[drag_cam].roi[2] = (float)(xb - xa);
-                    A.c[drag_cam].roi[3] = (float)(yb - ya);
+                    /* In the camera's own pixels, whatever size its pane is. */
+                    const double dsc = A.c[drag_cam].vs;
+                    A.c[drag_cam].roi[0] = (float)(xa / dsc);
+                    A.c[drag_cam].roi[1] = (float)(ya / dsc);
+                    A.c[drag_cam].roi[2] = (float)((xb - xa) / dsc);
+                    A.c[drag_cam].roi[3] = (float)((yb - ya) / dsc);
                     pthread_mutex_unlock(&A.m);
                 }
             } else if ((e.type == X11_PRESS && e.button == 3) || (e.type == X11_KEY && e.key == 'd')) {
@@ -1344,7 +1487,11 @@ int main(int argc, char **argv)
                 pthread_mutex_unlock(&A.m);
             } else if (e.type == X11_KEY) {
                 pthread_mutex_lock(&A.m);
-                if (e.key == 'm')
+                if (e.key == '[' || e.key == ']') {
+                    const float sharp = A.fsr_sharp + (e.key == '[' ? 0.2f : -0.2f);
+                    A.fsr_sharp = sharp < 0.0f ? 0.0f : sharp > 3.0f ? 3.0f : sharp;
+                    A.fsr_sharp_new = 1;
+                } else if (e.key == 'm')
                     A.mirror = !A.mirror;
                 else if (e.key == 'f')
                     A.vectors_all = !A.vectors_all;
@@ -1401,6 +1548,28 @@ int main(int argc, char **argv)
             if (due) {
                 memcpy(&r[k], &due->r, offsetof(struct vt_result, feat) + (size_t)due->r.nfeat * sizeof(struct vt_feat_out));
                 show_pic[k] = due->pic;
+                if (A.vec && k < VT_CELL_CAMERAS) {
+                    /* This picture's own vectors, or the newest before them. */
+                    int best = -1;
+                    for (int i = 0; i < VT_CELL_SLOTS; i++)
+                        if (A.cells_at[k][i].valid && A.cells_at[k][i].instance <= due->r.hdr.instance && (best < 0 || A.cells_at[k][i].instance > A.cells_at[k][best].instance))
+                            best = i;
+                    if (best >= 0) {
+                        show_cell_at[k] = A.cells_at[k][best];
+                        show_cells[k] = (const struct vt_cell *)(const void *)(A.l.part + vt_cells_offset((uint32_t)k, (uint32_t)best));
+                    }
+                }
+                if (A.vec && k == A.fsr_cam) {
+                    /* This picture's own lines, or the newest before them if they are late. */
+                    int best = -1;
+                    for (int i = 0; i < VT_VEC_SLOTS; i++)
+                        if (A.vec_at[i].valid && A.vec_at[i].instance <= due->r.hdr.instance && (best < 0 || A.vec_at[i].instance > A.vec_at[best].instance))
+                            best = i;
+                    if (best >= 0) {
+                        show_lines = A.vec_at[best];
+                        show_cover = A.l.part + vt_vec_offset((uint32_t)best);
+                    }
+                }
                 show_made[k] = due->generated;
                 K->passed += taken - 1;
                 K->shown++;
@@ -1472,14 +1641,21 @@ int main(int argc, char **argv)
             if (k == 0 && tracking && view_level >= 0 && r[0].debug_level == view_level && r[0].debug_w)
                 show_plane(&v, K->w, K->h, view_level, &r[0]);
             else if (caps[k] && A.mirror)
-                x11view_gray_mirror(&v, show_pic[k], K->w, K->h, K->w, ox, oy);
+                x11view_gray_mirror(&v, show_pic[k], K->vw, K->vh, K->vw, ox, oy);
             else if (caps[k])
-                x11view_gray(&v, show_pic[k], K->w, K->h, K->w, ox, oy, 1);
+                x11view_gray(&v, show_pic[k], K->vw, K->vh, K->vw, ox, oy, 1);
             else
-                x11view_fill(&v, ox, oy, K->w, K->h, 0x101010u);
+                x11view_fill(&v, ox, oy, K->vw, K->vh, 0x101010u);
             /* Under the tracker's own marks, and out of the way altogether while a target is being picked. */
-            if (tracking && map && !dragging)
-                dv_vectors(&v, map, k, ox, oy, K->w, A.mirror, vectors_all);
+            const int baked = A.vec && k == A.fsr_cam && A.vec_count && !vectors_all;
+            if (tracking && !dragging && baked && show_cover && show_lines.y1)
+                x11view_tint(&v, show_cover, (int)show_lines.w, (int)show_lines.y0, (int)show_lines.y1, ox, oy, A.mirror, 0xff8040u);
+            /* L and R's own, of this very picture, need no map. */
+            const int own = A.vec && k < VT_CELL_CAMERAS && A.cells_count[k];
+            if (tracking && !dragging && own && show_cells[k])
+                dv_cells(&v, show_cells[k], show_cell_at[k].cols, show_cell_at[k].rows, (int)show_cell_at[k].level, ox, oy, K->vw, K->vs, A.mirror, vectors_all);
+            if (tracking && map && !dragging && !baked && !own)
+                dv_vectors(&v, map, k, ox, oy, K->vw, K->vs, A.mirror, vectors_all);
             draw_view(&v, ox, oy, K, &r[k], tracking);
             text_outlined(&v, ox + 8, oy + K->h - 22, 2, caps[k] ? WHITE : GREY, K->name);
             if (!caps[k])
@@ -1598,7 +1774,8 @@ int main(int argc, char **argv)
                 panel_line(&v, &y, GREY, "its picture no longer matches its reference");
             } else if (tracking && (m3->flags & VT_F_METRIC)) {
                 const int measured = m3->age_s < 0.05;
-                panel_line(&v, &y, measured ? WHITE : GREY, "%s, age %.0f ms", measured ? "MEASURED" : "PREDICTED, NOT MEASURED", m3->age_s * 1000.0);
+                const int unproven = (m3->flags & VT_F_UNPROVEN) != 0;
+                panel_line(&v, &y, unproven ? GREY : measured ? WHITE : GREY, "%s, age %.0f ms", unproven ? "NOT PROVEN: BOXES AT REST, NOT THE THING" : measured ? "MEASURED" : "PREDICTED, NOT MEASURED", m3->age_s * 1000.0);
                 panel_line(&v, &y, WHITE, "X %+6.3f  Y %+6.3f  Z %+6.3f m", m3->pos[0], m3->pos[1], m3->pos[2]);
                 panel_line(&v, &y, GREY, "+- %5.3f    %5.3f    %5.3f", sqrt(m3->pos_cov[0]), sqrt(m3->pos_cov[4]), sqrt(m3->pos_cov[8]));
                 panel_line(&v, &y, WHITE, "V %+6.3f    %+6.3f    %+6.3f m/s", m3->vel[0], m3->vel[1], m3->vel[2]);
@@ -1609,6 +1786,8 @@ int main(int argc, char **argv)
                 panel_line(&v, &y, GREY, "UNAVAILABLE: select the region in L and in R");
             }
             panel_line(&v, &y, DIM, "correspondences %llu  contrast %s  blur %s", (unsigned long long)pairs, contrast ? "on" : "off", pre_gauss ? "on" : "off");
+            if (A.fsr)
+                panel_line(&v, &y, DIM, "D: FSR 720p%.4g > flow 1440p%.4g > Lanczos 1080p  RCAS %.1f stops  [ ] change it", A.c[2].rate, 2.0 * A.c[2].rate, (double)A.fsr_sharp);
             if (A.ncam == 3 && map) {
                 const struct vt_depth_out *h = map;
                 const double us = 1e-3 / TSC_HZ * 1e6;
@@ -1619,6 +1798,37 @@ int main(int argc, char **argv)
                 panel_line(&v, &y, GREY, " card ms: normalize %.1f sweep %.1f agg %.1f decide %.1f", (double)h->cycles_normalize * us, (double)h->cycles_sweep * us, (double)h->cycles_aggregate * us, (double)h->cycles_decide * us);
                 panel_line(&v, &y, GREY, " flow at level %u: L %u x %u cells", h->flow_level, h->cam[0].cols, h->cam[0].rows);
                 panel_line(&v, &y, GREY, " vectors ms L %.1f R %.1f D %.1f  moving %u %u %u", (double)h->cam[0].cycles_vectors * us, (double)h->cam[1].cycles_vectors * us, (double)h->cam[2].cycles_vectors * us, h->cam[0].moving, h->cam[1].moving, h->cam[2].moving);
+                if (A.vec && A.cells_count[0]) {
+                    rate_update(&A.cells_rate[0], A.cells_count[0], t);
+                    rate_update(&A.cells_rate[1], A.cells_count[1], t);
+                    panel_line(&v, &y, GREY, " orange: L %.1f R %.1f/s, on FSR's threads between its frames", A.cells_rate[0].value, A.cells_rate[1].value);
+                }
+                /* A line a second, for what happens when things move: maps, planes of D, frames of L and R, cells moving. */
+                if (t - rates_t >= 1.0) {
+                    rates_t = t;
+                    if (!rates_csv) {
+                        char path[80];
+                        const time_t wall = time(NULL);
+                        struct tm tm;
+                        localtime_r(&wall, &tm);
+                        strftime(path, sizeof path, "logs/live/rates-%Y%m%d-%H%M%S.csv", &tm);
+                        rates_csv = fopen(path, "w");
+                        if (rates_csv)
+                            fprintf(rates_csv, "t,maps,orange_d,orange_l,orange_r,moving_l,moving_r,moving_d,capture_to_result_us\n");
+                    }
+                    if (rates_csv) {
+                        fprintf(rates_csv, "%.3f,%llu,%llu,%llu,%llu,%u,%u,%u,%.0f\n", t, (unsigned long long)map_seq, (unsigned long long)A.vec_count, (unsigned long long)A.cells_count[0], (unsigned long long)A.cells_count[1], h->cam[0].moving, h->cam[1].moving, h->cam[2].moving, lat_med);
+                        fflush(rates_csv);
+                    }
+                }
+                if (A.vec && A.vec_count) {
+                    if (t - vec_t_was >= 1.0) {
+                        vec_rate = vec_t_was > 0.0 ? (double)(A.vec_count - vec_count_was) / (t - vec_t_was) : 0.0;
+                        vec_count_was = A.vec_count;
+                        vec_t_was = t;
+                    }
+                    panel_line(&v, &y, GREY, " orange: D on the spare core, %u threads, %.1f/s: vectors %.1f lines %.2f down %.1f ms, %u lines", A.vec_last.threads, vec_rate, (double)A.vec_last.cycles_vectors * us, (double)A.vec_last.cycles_draw * us, (double)A.vec_last.cycles_down * us, A.vec_last.lines);
+                }
                 panel_line(&v, &y, GREY, " frames in the means L %.0f R %.0f D %.0f", (double)h->cam[0].count_mean, (double)h->cam[1].count_mean, (double)h->cam[2].count_mean);
                 panel_line(&v, &y, GREY, " drift, camera px: L %+.2f%+.2f R %+.2f%+.2f D %+.2f%+.2f", 4.0 * (double)h->cam[0].drift_u, 4.0 * (double)h->cam[0].drift_v, 4.0 * (double)h->cam[1].drift_u, 4.0 * (double)h->cam[1].drift_v, 4.0 * (double)h->cam[2].drift_u, 4.0 * (double)h->cam[2].drift_v);
             }

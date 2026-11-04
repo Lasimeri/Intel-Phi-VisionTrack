@@ -47,6 +47,7 @@ struct score {
     int n_meas, n_pos, n_zvel;
     int visible, observed_visible, n_observed, n_unobs, n_new, n_lost, n_reacq, n_metric, n_rej, n_amb, n_nofeat, feat_sum, first_id, id_changes, hidden, hidden_observed, metric_when_ambiguous, exc_results;
     int nees_in, nis_in;
+    int n_unproven, unproven_honest, n_unproven_f, unproven_f_honest;
     int prev_index;
     int first_reacq, hidden_end;
     double reacq_err;
@@ -62,7 +63,7 @@ struct score *score_new(const struct dataset *ds, const char *csv_path)
     s->first_reacq = -1;
     s->csv = csv_path ? fopen(csv_path, "w") : NULL;
     if (s->csv)
-        fprintf(s->csv, "seq,index,state,flags,track,nfeat,nfeat3d,cx,cy,truth_u,truth_v,visible,center_err_px,inliers,missing,reacq_ncc,meas_x,meas_y,meas_z,pos_x,pos_y,pos_z,vel_x,vel_y,vel_z,sig_x,sig_y,sig_z,sig_vx,sig_vy,sig_vz,truth_x,truth_y,truth_z,truth_vx,truth_vy,truth_vz,reproj,nis,nees,age_s,lat_us,us_dma,us_queue,us_pyr,us_lk,us_region,us_stereo,us_est,us_track,travel_err_px\n");
+        fprintf(s->csv, "seq,index,state,flags,track,nfeat,nfeat3d,cx,cy,truth_u,truth_v,visible,center_err_px,inliers,missing,reacq_ncc,meas_x,meas_y,meas_z,pos_x,pos_y,pos_z,vel_x,vel_y,vel_z,sig_x,sig_y,sig_z,sig_vx,sig_vy,sig_vz,truth_x,truth_y,truth_z,truth_vx,truth_vy,truth_vz,reproj,nis,nees,age_s,lat_us,us_dma,us_queue,us_pyr,us_lk,us_region,us_stereo,us_est,us_track,us_depth,us_gen,travel_err_px,pt_x,pt_y,pt_sx,pt_sy,truth_cam_u,truth_cam_v\n");
     return s;
 }
 
@@ -78,6 +79,7 @@ static double nees3(const double *P, const double *e)
     return (e[0] * (A * e[0] + B * e[1] + C * e[2]) + e[1] * (B * e[0] + D * e[1] + E * e[2]) + e[2] * (C * e[0] + E * e[1] + F * e[2])) / det;
 }
 
+#define DUALBOX_LIMIT_M 1.0 /* from the measured 0.767 m: no correspondence between the views, so no better is on offer. Scene gate, not a claim of accuracy */
 #define CHI3_LO 0.2158 /* chi-square, 3 degrees of freedom, 2.5 % */
 #define CHI3_HI 9.3484 /* 97.5 % */
 
@@ -90,14 +92,12 @@ void score_frame(struct score *s, const struct vt_result *o, double lat_us, doub
     struct truth t;
     const double now_s = ((double)o->hdr.acq_ns - 1e9) * 1e-9;
     scene_truth_at(sc, now_s, &t);
-    /* A generated frame is no observation: where the region was on it is kept apart, and the next real frame's motion runs from its instant. */
+    /* A generated frame is no observation: where the region was said to be on it is graded apart, and the real rows go on from the last real instant. */
     if (o->flags & VT_F_GENERATED) {
         s->n_generated++;
         stat_add(&s->gen_us, (double)o->cycles[VT_T_GEN] * us_per_cycle);
         if (o->state == VT_ST_OBSERVED && t.on_screen && t.visible >= 0.5 && cam == 0)
             stat_add(&s->center_gen, hypot((double)o->cx - t.u, (double)o->cy - t.v));
-        if (cam == 0)
-            s->prev_s = now_s;
         return;
     }
     const int after = fi > sc->select_frame && cam == 0;
@@ -176,17 +176,28 @@ void score_frame(struct score *s, const struct vt_result *o, double lat_us, doub
         s->prev_s = now_s;
     if (o->flags & (VT_F_3D_MEASURED | VT_F_3D_REJECTED)) {
         const double e[3] = {o->meas[0] - t.X, o->meas[1] - t.Y, o->meas[2] - t.Z};
-        s->s_meas += e[0] * e[0] + e[1] * e[1] + e[2] * e[2];
-        s->s_measz += e[2] * e[2];
-        s->n_meas++;
-        stat_add(&s->reproj, o->reproj_rms);
+        /* What says it is unproven is asked another question: is the uncertainty it states true? */
+        if (o->flags & VT_F_UNPROVEN) {
+            s->n_unproven++;
+            s->unproven_honest += fabs(e[0]) <= 3.0 * sqrt(o->meas_cov[0]) && fabs(e[1]) <= 3.0 * sqrt(o->meas_cov[4]) && fabs(e[2]) <= 3.0 * sqrt(o->meas_cov[8]);
+        } else {
+            s->s_meas += e[0] * e[0] + e[1] * e[1] + e[2] * e[2];
+            s->s_measz += e[2] * e[2];
+            s->n_meas++;
+            stat_add(&s->reproj, o->reproj_rms);
+        }
     }
     if (o->nis > 0.0) {
         stat_add(&s->nis, o->nis);
         s->nis_in += o->nis >= CHI3_LO && o->nis <= CHI3_HI;
     }
     double frame_nees = 0.0;
-    if ((o->flags & VT_F_METRIC) && fi > sc->select_frame + 15 && t.visible >= 0.3) {
+    if ((o->flags & VT_F_METRIC) && (o->flags & (VT_F_UNPROVEN | VT_F_POINT_MID)) && fi > sc->select_frame + 15 && t.visible >= 0.3) {
+        const double e[3] = {o->pos[0] - t.X, o->pos[1] - t.Y, o->pos[2] - t.Z};
+        s->n_unproven_f++;
+        s->unproven_f_honest += fabs(e[0]) <= 3.0 * sqrt(o->pos_cov[0]) && fabs(e[1]) <= 3.0 * sqrt(o->pos_cov[4]) && fabs(e[2]) <= 3.0 * sqrt(o->pos_cov[8]);
+    }
+    if ((o->flags & VT_F_METRIC) && !(o->flags & VT_F_UNPROVEN) && fi > sc->select_frame + 15 && t.visible >= 0.3) {
         const double e[3] = {o->pos[0] - t.X, o->pos[1] - t.Y, o->pos[2] - t.Z};
         const double ev[3] = {o->vel[0] - t.Vx, o->vel[1] - t.Vy, o->vel[2] - t.Vz};
         s->s_pos += e[0] * e[0] + e[1] * e[1] + e[2] * e[2];
@@ -212,7 +223,7 @@ void score_frame(struct score *s, const struct vt_result *o, double lat_us, doub
                 sqrt(o->pos_cov[0]), sqrt(o->pos_cov[4]), sqrt(o->pos_cov[8]), sqrt(o->vel_var[0]), sqrt(o->vel_var[1]), sqrt(o->vel_var[2]), t.X, t.Y, t.Z, t.Vx, t.Vy, t.Vz, o->reproj_rms, o->nis, frame_nees, o->age_s, lat_us);
         for (int k = 0; k < VT_T_COUNT; k++)
             fprintf(s->csv, ",%.1f", (double)o->cycles[k] * us_per_cycle);
-        fprintf(s->csv, ",%.3f\n", terr);
+        fprintf(s->csv, ",%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f\n", terr, (double)o->pt_x, (double)o->pt_y, (double)o->pt_sx, (double)o->pt_sy, cam == 1 ? t.ub : t.u, cam == 1 ? t.vb : t.v);
     }
 }
 
@@ -270,8 +281,35 @@ int score_gate(struct score *s, FILE *f)
     } while (0)
     const double cont = s->visible ? (double)s->observed_visible / s->visible : 0.0;
     const double epe = pct(&s->epe, .5), center = pct(&s->center, .5), meas = rms(s->s_meas, s->n_meas), vel = rms(s->s_vel, s->n_pos);
+    const double filt = rms(s->s_pos, s->n_pos);
     NEED(s->hidden_observed == 0, "a hidden region must never read as observed");
     NEED(s->id_changes == 0, "the track id stays");
+    /* Whatever says it does not know must not know honestly: its error inside three of its own sigmas. */
+    NEED(!s->n_unproven || s->unproven_honest * 100 >= s->n_unproven * 95, "unproven 3D: 95 % of measures within 3 stated sigma");
+    NEED(!s->n_unproven_f || s->unproven_f_honest * 100 >= s->n_unproven_f * 95, "unproven 3D: 95 % of filter rows within 3 stated sigma");
+    /* A generated row's box is the middle of two real ones: all it may add to their error is half the bend in the path between them. 3 px, from the measured 2.617 px on comeback, whose p95 is over 93 rows and set by the few around the head's wake. */
+    if (s->center_gen.n && s->center.n) {
+        NEED(pct(&s->center_gen, .5) <= pct(&s->center, .5) + 1.0, "generated boxes: median within 1 px of the real ones'");
+        NEED(pct(&s->center_gen, .95) <= pct(&s->center, .95) + 3.0, "generated boxes: p95 within 3 px of the real ones'");
+    }
+    /* 3D where a box holds other depths than the thing's. Measured, then about 1.5 to 5 times that: 0.62, 0.53, 0.35, 6.2, 18.4, 0.72, 17.9, 65.5, 44.9, 2.9 mm against 1341, 5114, 1160, 1341, 1341, 2977, 2482, 1347, 2073, 2142 mm when
+     * the median of the whole box was read while the head stood still. X and Y carry the region's 2D error, so a thing of parts cannot do better. Dart's filter cannot follow a thing that turns round in a frame or two. */
+    {
+        double lim_meas = 0.0, lim_filt = 0.0;
+        switch (s->ds->s.id) {
+        case SC_BIGBOX: case SC_STILLSTART: case SC_COMEBACK: lim_meas = lim_filt = 0.003; break;
+        case SC_SWING: lim_meas = 0.003; lim_filt = 0.010; break;
+        case SC_SMALLBOX: lim_meas = lim_filt = 0.015; break;
+        case SC_ROTATE: case SC_OFFBOX: lim_meas = lim_filt = 0.030; break;
+        case SC_JOINTED: case SC_OFFJOINTED: lim_meas = lim_filt = 0.090; break;
+        case SC_DART: lim_meas = 0.010; lim_filt = 0.600; break;
+        default: break;
+        }
+        if (lim_meas > 0.0 && s->ds->s.stereo && s->n_meas > 0) {
+            NEED(meas <= lim_meas, "proven 3D RMSE inside this scene's limit");
+            NEED(filt <= lim_filt, "filter RMSE inside this scene's limit");
+        }
+    }
     switch (s->ds->s.id) {
     case SC_TRANSLATE:
     case SC_CAMERA:
@@ -345,6 +383,13 @@ int score_gate(struct score *s, FILE *f)
         NEED(center <= 0.5, "centre median <= 0.5 px");
         NEED(meas <= 0.005, "3D RMSE <= 5 mm");
         NEED(vel <= 0.05, "velocity RMSE <= 50 mm/s");
+        break;
+    case SC_DUALBOX:
+        /* What the live window does: two boxes drawn by hand, the thing still at first. Until both have moved no point is claimed. After that each view has only the middle of its own corners, which is not the same spot in the other view: no correspondence, so no millimetres. What it must do is say so. */
+        NEED(cont >= 0.95, "continuity >= 0.95");
+        NEED(s->n_unproven > 0, "3D is unproven while the thing stands still");
+        NEED(s->n_unproven_f > 0, "and every row with a point that is no correspondence is held to its stated sigma");
+        NEED(filt <= DUALBOX_LIMIT_M, "filter RMSE, once it has moved, inside the limit measured for hand-drawn boxes");
         break;
     case SC_DUAL:
         NEED(cont >= 0.99, "continuity >= 0.99");

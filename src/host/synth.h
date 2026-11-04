@@ -33,6 +33,7 @@ enum scene_id {
     SC_PASSBY,      /* a still thing selected; another crosses the box without touching it: the window has no business leaving */
     SC_DART,        /* to and fro at up to 28 pixels a frame, blurred by a half-frame shutter: what optical flow loses */
     SC_DUAL,        /* a second camera off to the side, turned 17.5 degrees, a different focal length, its shutter 11 ms late: the rig of two cameras that were never a stereo pair */
+    SC_DUALBOX,     /* the same rig over a busy background; the thing stands still for 2 s, and the box in each view is 2.4 times its size and off its middle, each its own way: what an operator draws in two windows */
     SC_COUNT,
 };
 
@@ -48,6 +49,7 @@ struct scene {
     double shutter; /* of a frame, the exposure: 0 sees one instant */
     /* SC_DUAL, camera 1: X_b = R X_a + T */
     double b_f, b_R[9], b_T[3], b_delay_s;
+    int clean; /* no sensor noise: the truth a picture is graded against */
 };
 
 struct truth {

@@ -6,7 +6,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-static const char *const names[SC_COUNT] = {"translate", "shapes", "camera", "brightness", "noise", "occlusion", "loss", "leave", "helix", "linear3d", "repeat", "flat", "glitch", "bigbox", "hold", "smallbox", "stillstart", "rotate", "swing", "comeback", "offbox", "jointed", "offjointed", "passby", "dart", "dual"};
+static const char *const names[SC_COUNT] = {"translate", "shapes", "camera", "brightness", "noise", "occlusion", "loss", "leave", "helix", "linear3d", "repeat", "flat", "glitch", "bigbox", "hold", "smallbox", "stillstart", "rotate", "swing", "comeback", "offbox", "jointed", "offjointed", "passby", "dart", "dual", "dualbox"};
 
 const char *scene_name(enum scene_id id) { return names[id]; }
 
@@ -35,7 +35,7 @@ void scene_setup(struct scene *s, enum scene_id id, int w, int h, int nframes, d
     s->select_frame = 5;
     s->samples = w > 1400 ? 2 : 3;
     s->shutter = id == SC_JOINTED || id == SC_OFFJOINTED || id == SC_DART ? 0.5 : 0.0;
-    if (id == SC_DUAL) {
+    if (id == SC_DUAL || id == SC_DUALBOX) {
         /* Camera 1 stands at C = (1.2, 0.1, 0.2) m, turned by 17.5 degrees about y toward the scene, with 70 % of the focal length. */
         const double th = 17.5 * M_PI / 180.0, ct = cos(th), st = sin(th);
         const double R[9] = {ct, 0.0, st, 0.0, 1.0, 0.0, -st, 0.0, ct};
@@ -97,7 +97,7 @@ static inline void unturn(const struct motion *m, double *lx, double *ly)
 }
 
 /* The background as busy as the object, so that features on it are as good as features on the object. */
-static inline int busy_background(const struct scene *s) { return s->id == SC_BIGBOX || s->id == SC_SMALLBOX || s->id == SC_STILLSTART || s->id == SC_ROTATE || s->id == SC_SWING || s->id == SC_COMEBACK || s->id == SC_OFFBOX || s->id == SC_JOINTED || s->id == SC_OFFJOINTED || s->id == SC_PASSBY || s->id == SC_DART; }
+static inline int busy_background(const struct scene *s) { return s->id == SC_DUALBOX || s->id == SC_BIGBOX || s->id == SC_SMALLBOX || s->id == SC_STILLSTART || s->id == SC_ROTATE || s->id == SC_SWING || s->id == SC_COMEBACK || s->id == SC_OFFBOX || s->id == SC_JOINTED || s->id == SC_OFFJOINTED || s->id == SC_PASSBY || s->id == SC_DART; }
 
 static void motion_at(const struct scene *s, double t, struct motion *m)
 {
@@ -271,6 +271,16 @@ static void motion_at(const struct scene *s, double t, struct motion *m)
         m->X = -0.3 + 0.1 * t;
         m->Vx = 0.1;
         break;
+    case SC_DUALBOX: {
+        const double tm = t < 2.0 ? 0.0 : t - 2.0, go = t < 2.0 ? 0.0 : 1.0;
+        m->X = -0.5 + 0.2 * tm;
+        m->Y = 0.15 * sin(1.1 * tm);
+        m->Z = 3.6 + 0.2 * tm;
+        m->Vx = 0.2 * go;
+        m->Vy = 0.165 * cos(1.1 * tm) * go;
+        m->Vz = 0.2 * go;
+        break;
+    }
     case SC_DUAL:
         m->X = -0.5 + 0.2 * t;
         m->Y = 0.15 * sin(1.1 * t);
@@ -385,6 +395,8 @@ static inline double shade_b(const struct scene *s, const struct motion *m, doub
     if (k > 0.0 && fabs(lx) <= m->halfx && fabs(ly) <= m->halfy)
         return object_surface(s, lx, ly);
     const double kb = (12.0 - C[2]) / d[2];
+    if (busy_background(s))
+        return texture(C[0] + d[0] * kb, C[1] + d[1] * kb, 0.30, 31);
     return 40.0 + 0.6 * texture(C[0] + d[0] * kb, C[1] + d[1] * kb, 0.45, 31);
 }
 
@@ -417,11 +429,11 @@ static void *render_rows(void *arg)
             double sum = 0.0;
             for (int b = 0; b < n; b++)
                 for (int a = 0; a < n; a++)
-                    sum += s->id == SC_DUAL && j->camera == 1 ? shade_b(s, j->m, x + start + a * step, y + start + b * step) : shade(s, blurred ? &j->m[a * n + b] : j->m, x + start + a * step + shift, y + start + b * step, j->camera);
+                    sum += (s->id == SC_DUAL || s->id == SC_DUALBOX) && j->camera == 1 ? shade_b(s, j->m, x + start + a * step, y + start + b * step) : shade(s, blurred ? &j->m[a * n + b] : j->m, x + start + a * step + shift, y + start + b * step, j->camera);
             double v = sum / (n * n);
             v = v * j->m->gain + j->m->offset;
             if (j->m->noise > 0.0)
-                v += j->m->noise * gauss_at(hash2(x, y, (uint32_t)(j->frame * 2 + j->camera)), hash2(y, x, (uint32_t)(j->frame * 2 + j->camera + 7777)));
+                v += (s->clean ? 0.0 : j->m->noise) * gauss_at(hash2(x, y, (uint32_t)(j->frame * 2 + j->camera)), hash2(y, x, (uint32_t)(j->frame * 2 + j->camera + 7777)));
             v = floor(v + 0.5);
             row[x] = (uint8_t)(v < 0.0 ? 0 : v > 255.0 ? 255 : v);
         }
@@ -431,7 +443,7 @@ static void *render_rows(void *arg)
 
 #define POOL 14
 
-void scene_render(const struct scene *s, int frame, int camera, uint8_t *img) { scene_render_at(s, (double)frame / s->fps + (s->id == SC_DUAL && camera == 1 ? s->b_delay_s : 0.0), frame, camera, img); }
+void scene_render(const struct scene *s, int frame, int camera, uint8_t *img) { scene_render_at(s, (double)frame / s->fps + ((s->id == SC_DUAL || s->id == SC_DUALBOX) && camera == 1 ? s->b_delay_s : 0.0), frame, camera, img); }
 
 void scene_render_at(const struct scene *s, double seconds, int frame, int camera, uint8_t *img)
 {
@@ -498,7 +510,7 @@ void scene_truth_at(const struct scene *s, double seconds, struct truth *t)
     t->visible = visible_fraction(s, &m);
     t->half_w = s->f * m.halfx / m.Z;
     t->half_h = s->f * m.halfy / m.Z;
-    if (s->id == SC_DUAL) {
+    if (s->id == SC_DUAL || s->id == SC_DUALBOX) {
         const double *R = s->b_R, *T = s->b_T;
         const double q[3] = {R[0] * t->X + R[1] * t->Y + R[2] * t->Z + T[0], R[3] * t->X + R[4] * t->Y + R[5] * t->Z + T[1], R[6] * t->X + R[7] * t->Y + R[8] * t->Z + T[2]};
         t->ub = s->b_f * q[0] / q[2] + s->cx;

@@ -671,3 +671,110 @@ Centre error, median/p95 px, over all frames unless said. Region model: card at 
 On `bigbox` the measure reads 11.996 m at frames 5 to 8, with the window at rest, and 4.000 m from frame 9, when the head moves. The filter, started at 12 m, rejects 46 measures and reads 11.994 m through frame 53; 4.000 m by frame 56. On `swing`, `rotate`, `offbox` and `dart` it is over 1 m wrong on 47 to 58 of 144 rows. `stillstart`, still for 2 s: measure wrong on 59 rows, filter on 103 of 144.
 
 **Live, no truth** (`logs/live/track-20261103-112631.csv`, about 2.5 min): no box over half the picture on any camera; centre leaps over 100 px: L 0, R 2, D 5; unobserved R 328 of 3,307 rows, D 318 of 1,475, L 0. Measure and filter never differ by over 0.25 m in 1,375 real rows. Pictures on the screen L 59.9, R 60.0, D 30.0 a second, capture to screen mean 65.1, 67.2, 113.3 ms.
+
+## Generated frames, the tracker and 3D (2026-11-03 15:40 to 16:30, host replay unless said; scenes 640x480)
+
+**Why generated frames broke the tracker.** Against a plain run, real rows parted at the frame the head woke. `dart`: 53.94 px apart by frame 20, lost. `smallbox`: .50 to 8.48 px over 120 frames, about .067 px a frame: each real frame's flow started from a position measured on a picture blended from 16 px blocks. **So the tracker no longer reads them.** A generated row's box is the middle of the two real boxes around it. Real rows are the same to the bit with generation on or off: `check.sh` compares them on 8 scenes.
+
+| Scene | Generated boxes: median, p95 px | Real: median, p95 px |
+| --- | --- | --- |
+| bigbox | .079, .135 | .079, .135 |
+| rotate | 2.582, 3.685 | 2.585, 3.684 |
+| swing | .185, .244 | .008, .011 |
+| dart | .334, 2.317 | .086, 1.821 |
+
+**3D.** A head at rest read the box's median, mostly background; filters then refused the truth. Proven 3D RMSE, mm, before and after:
+
+| Scene | Before | After | Filter after |
+| --- | --- | --- | --- |
+| bigbox | 1340.9 | .62 | .59 |
+| stillstart | 5114.0 | .53 | .50 |
+| swing | 1159.8 | .35 | 2.66 |
+| smallbox | 1341.1 | 6.20 | 6.29 |
+| rotate | 1341.3 | 18.41 | 18.81 |
+| offbox | 2482.4 | 17.87 | 15.93 |
+| offjointed | 2072.5 | 44.86 | 45.11 |
+| jointed | 1347.0 | 65.49 | 66.97 |
+| dart | 2142.1 | 2.93 | 522.5 (1959 before) |
+
+At rest nothing is claimed for 3 frames, and every later row is flagged not proven with uncertainty as wide as the box and the depth, and a gate holds it to 3 stated sigma.
+
+**Two views.** The live window triangulates two points, not features. New scene `dualbox`, boxes 2.4 times the thing and off centre each its own way, read 2962 mm wrong and 145 of 145 rejected. The middle of each box's members as the shared point: `dual` went 14.27 to 73.88 mm and reprojection .07 to 2.47 px, since each view has its own corners. So the box's centre stays while it agrees with its members, the members' middle takes over when plainly it does not, and that bias is stated, not filtered: `dual` 14.06 mm, 0 rejected; `dualbox` 767 mm, true to 3 stated sigma on 200 of 200 rows.
+
+## FSR on camera D (2026-11-03 16:10 to 17:35; raw `results/runs/`, `logs/live/`)
+
+Chain, the operator's order: real frames up by FSR 3.1.6, flow between the finished pictures, Lanczos down. Card = host, every byte of every picture: bigbox 1280x720 to 2560x1440 to 1920x1080, 10 frames; bigbox and hold 640x480 to 1280x960 to 960x720, 24 and 60 frames.
+
+Against the scene rendered clean at the final size, from frame 30, host, RCAS .4 stops except where said:
+
+| Scene, chain | Whole | On the thing | Plain Lanczos, whole |
+| --- | --- | --- | --- |
+| hold (noise), up 2 then Lanczos | 48.84 dB | 45.90 dB | 37.72 dB |
+| hold, straight to 1.5, RCAS 0 | 44.60 dB | 41.32 dB | 37.72 dB |
+| bigbox (no noise), up 2 then Lanczos | 42.49 dB | 34.80 dB | 52.16 dB |
+
+**The first, faithful version was wrong for fixed cameras:** AMD's 3 x 3 with a kernel bias takes a slice of each jittered frame; with no jitter it staircased, 30.28 dB against 52.19 on bigbox. The whole 4 x 4 Lanczos replaced it. **The operator's verdict, by eye, on the real camera, in a wipe against a plain Lanczos: "so much better".**
+
+Cost on the card, bigbox 1280x720, 10 frames including first-touch page faults: 31.2 ms a real frame, 20.7 of it accumulation. Inline it starved the tracker (L 14.55 pictures a second, 479 ms to the screen), so it runs on the third and fourth hardware threads of every core and lets a frame go if it is still busy.
+
+Live, 20 s, L + R + D, regions selected: 59.95, 60.00, 29.05 pictures a second; capture to screen 71.0, 74.9, 170.8 ms. The card's `top` read 97 %, which counts team threads spinning between rounds and so says nothing about capacity.
+
+## The orange vectors on the spare core (2026-11-03 17:56 to 18:06; card; `out/host/vd_ref`, `scripts/card_run.sh -p 256 vt_vd`, the window's panel, `logs/live/shown-*.csv`)
+
+The operator's order: on the column phitop shows empty, over the flow at 1440p, before the downscale. phitop's columns are cores: core 59 stood empty, all four threads. Its two block pollers (cpus 238, 239) sleep while nothing swaps, so the team is cpus 237 and 240; two threads can issue every cycle of a core, so the other two would add little.
+
+| Check, card | Result |
+| --- | --- |
+| A line lands where cell and vector say, in the plane and after the Lanczos | all checks pass, card and host |
+| Bytes of the result | `down_hash 8f54e7f7a4a46ab0` on both |
+| Erase by drawing the last lines in zero, against clearing, 1280x720, 3 lines | 24,283 against 4,522,513 cycles |
+
+Live, 1080p L + R, D 720p to 1440p to 1080p, no region selected, 20 s:
+
+| | Before (17:40) | First build (18:00) | Now (18:05) |
+| --- | --- | --- | --- |
+| Depth maps a second | 12.0 | **about 1.1** | 12.8 (818 in about 64 s) |
+| Orange planes a second | | 10.9 | 15.9 |
+| L, R, D shown a second | 59.95, 60.00, 29.05 | 59.90, 60.00, 30.05 | 60.00, 60.00, 29.20 |
+| Capture to screen, ms | 71.0, 74.9, 170.8 | 69.5, 69.7, 168.8 | 70.0, 73.1, 170.8 |
+
+**The first build took the map down by an order of magnitude.** Its handoff to the spare core lay in the frame loop's idle gaps, so each cycle ran past D's 66 ms, D was always waiting again, and the map, which must not read a frame in progress, never had a turn. Moving the handoff to the top of the loop cured it.
+
+On the spare core, two threads, one panel reading each: vectors 13.2, lines 0.40, down 9.4 ms; at 179 lines vectors 13.6, lines 1.80, down 23.5 ms; at 494 lines vectors 14.7, lines 6.33, down over 30 ms (read cut off). Vectors alone 12.6 to 14.7 ms, against 0.6 ms on the session's 118 threads.
+
+**L and R's vectors under motion (18:09 to 18:26).** The operator saw them lag out completely with much moving, D's fine. They reached the window only inside the map, which runs in the frame loop's gaps; motion takes the gaps, and a guard of the first build took the map's turn while D's vectors ran. They now run on FSR's team and go out alone, a frame at a time, and the window draws those of the picture on screen. A first try ran them between FSR's stages, about 5 ms, 60 a second, on top of FSR's 705 ms a second: FSR let 780 of 2,478 frames go, D 19 to 23 pictures a second. Between FSR's frames instead (`logs/live/rates-20261103-182328.csv`, shown csv, 150 s, by cells moving over all three):
+
+| Cells moving | Seconds | Shown L, R, D | Orange L, R, D | Maps | Capture to result, ms |
+| --- | --- | --- | --- | --- | --- |
+| under 300 | 49 | 60.0, 60.0, 28.0 | 29.4, 28.9, 14.9 | 14.8 | 46.28 |
+| 300 to 800 | 47 | 59.9, 60.0, 25.1 | 28.4, 27.2, 14.8 | 14.8 | 48.49 |
+| over 800 | 54 | 59.9, 60.0, 23.8 | 27.5, 25.6, 14.9 | 14.9 | 46.45 |
+
+The lowest single second over 800 cells moving: L 23.9, R 17.9. Costs from the last 400 maps: L vectors 1,408 and mean 2,632 microseconds, R 1,356 and 2,651, D 13,494 and 695. Capture to screen over 60 s: 75.4, 73.8, 173.7 ms. **D at 23.8 pictures a second under motion is not a solved problem.**
+
+## Tracking on FSR's pictures, against raw frames (2026-11-03 18:02, host, `out/host/vt_fsrtrack SCENE 640x480 --mono --frames 150 --fsr 960x720 --fsr-up 1280x960 --fsr-sharp 0.4`, one run each, in raw pixels)
+
+The operator wanted the better effective bitrate to make tracking steadier. Not wired: the data do not say so.
+
+| Scene | Step error rms, raw | FSR | Centre median, raw | FSR |
+| --- | --- | --- | --- | --- |
+| bigbox | 0.4438 | 0.4424 | 0.079 | 0.047 |
+| dart | 6.5644 | **4.9231** | 0.086 | **2.176** |
+| hold | 0 | 0 | 0 | 0 |
+| noise | 0.3785 | **0.3106** | 0.037 | **3.666** |
+| swing | 2.9383 | 2.9401 | 0.008 | 0.025 |
+| translate | 0.4728 | **0.3192** | 0.006 | 0.031 |
+
+Steadier from frame to frame on three of six; further from the truth on four of six, `noise` by a p95 of 6.000 against 0.074 px. Continuity 1.0000 throughout. The scenes are 640x480, not the live sizes, and none has a real camera's noise.
+
+## L and R at 24, D at 12.5 (the operator's order, 2026-11-03 18:26; `logs/live/rates-20261103-183010.csv`, shown csv, 69 s)
+
+Each doubled: 48, 48 and 25 a second. Device modes from `v4l2-ctl --list-formats-ext`: L at 1080p 60, 50, 30, 20, 10; R 60, 30; D at 720p 30, 25, 20, 15, 10, 5.
+
+| Cells moving | Seconds | Shown L, R, D | Orange L, R, D | Maps | Capture to result, ms |
+| --- | --- | --- | --- | --- | --- |
+| under 300 | 22 | 47.7, 47.8, 23.8 | 24.2, 24.2, 12.5 | 12.5 | 42.79 |
+| 300 to 800 | 20 | 46.9, 46.9, 22.5 | 23.4, 23.5, 12.5 | 12.5 | 42.98 |
+| over 800 | 27 | 48.0, 48.0, 21.4 | 23.5, 23.3, 12.4 | 12.4 | 42.79 |
+
+Over the last 30 s: 48.03, 48.00 and 23.17 shown a second, capture to screen 80.4, 80.7 and 200.3 ms, D's at its limit of 2.5 frames. D's real frames: 908 shown, 26 skipped. **D at 23.17 of 25 is short of the order.**

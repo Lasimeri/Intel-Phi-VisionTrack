@@ -16,7 +16,7 @@ Built on [Intel-Phi-7120A](https://github.com/Lasimeri/Intel-Phi-7120A) and [Int
 | M2 optical-flow tracking | **kernel and tracking run on the card**: the first tracker's median on a virtual gimbal, so the window travels with the target on fixed cameras; frames generated between real ones and shown (59.9, 60.0 and 30.0 pictures a second on the screen, capture to screen 65 and 114 ms); a lost region searched for over the whole picture until the operator ends it. On known truth in scenes, and "seems good" by the operator's own live tests, with no number. **With generated frames on, as live, 5 of 16 scene runs fail, and 3D reads the background until the head first moves: neither fixed** ([limitations](docs/limitations.md)) | [measurements](docs/measurements.md) |
 | M3 stereo reconstruction | **runs on the card, 1 to 2 mm RMSE on synthetic scenes**; ambiguity reported, gate fires | [measurements](docs/measurements.md) |
 | M4 temporal state estimation | **runs on the card**; covariance not calibrated | [measurements](docs/measurements.md) |
-| M5 live visualization, integration | **three cameras and a depth map live on the card** (L + R 1080p30, D 720p15; 15.9 maps/s at 9.8 ms, 18.41 % of textured pixels confident); LED star tracker live; the card's vectors gate the depth map's averaging; tracking first, with flow and the map in the card's idle moments; optical flow at half native (4,080 cells for L and R; native, 16,200, also holds); each camera's turn measured constantly on the card from its own picture, with no lock, carrying the geometry; **the map is not yet right: L and R mostly do not agree through D except on one near object; no measured ground truth; a real knock not yet seen live** | [measurements](docs/measurements.md) |
+| M5 live visualization, integration | **three cameras and a depth map live on the card** (L + R 1080p kept at 24, doubled to 48; D 720p kept at 12.5, through FSR and flow to 1080p25; 15.9 maps/s at 9.8 ms, 18.41 % of textured pixels confident); LED star tracker live; the card's vectors gate the depth map's averaging; tracking first, with flow and the map in the card's idle moments; optical flow at half native (4,080 cells for L and R; native, 16,200, also holds); each camera's turn measured constantly on the card from its own picture, with no lock, carrying the geometry; **the map is not yet right: L and R mostly do not agree through D except on one near object; no measured ground truth; a real knock not yet seen live** | [measurements](docs/measurements.md) |
 | M6 optimization, validation | partial | [limitations](docs/limitations.md) |
 
 Open items: [limitations](docs/limitations.md). Design: [architecture](docs/architecture.md).
@@ -26,7 +26,7 @@ Open items: [limitations](docs/limitations.md). Design: [architecture](docs/arch
 ```
 make                        # host tools + card programs (14 jobs); every card binary is ISA-audited
 make compdb                 # compile_commands.json + clangd, 0 diagnostics or exit 1
-scripts/vtrackd.sh start 512
+scripts/vtrackd.sh start 1024
 scripts/scene.sh linear3d 640x480   # the card, then its replay on the host, compared frame by frame
 scripts/scene.sh bigbox 640x480 --framegen   # with generated frames between the real ones
 scripts/scene.sh comeback 640x480 --frames 240 --gate   # past any patience and back; scene names and tolerances: tests/scenes.md

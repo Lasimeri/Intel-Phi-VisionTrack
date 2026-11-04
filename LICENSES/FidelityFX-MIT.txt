@@ -1,3 +1,4 @@
+The temporal upscaler in src/kern/fsr3.c derives from the FidelityFX SDK's FSR 3.1.6 upscaler shaders (ffx_fsr3upscaler_*.h) and RCAS (ffx_fsr1.h), reimplemented for MVEX.
 The motion field in src/kern/framegen.c derives from the FidelityFX SDK's optical flow shaders
 (ffx_opticalflow_compute_optical_flow_v5.h, ffx_opticalflow_filter_optical_flow_v5.h,
 ffx_opticalflow_scale_optical_flow_advanced_v5.h), reimplemented for MVEX.

@@ -20,4 +20,16 @@ void kf_update(struct kf *k, const long double *z, const long double *r33);
 
 #define KF_GATE_NIS 16.27L /* chi-square, 3 degrees of freedom, p = 0.001 */
 
+/* A gate can lock a filter out: started from something wrong, it refuses every right measure after it, for as long as they keep coming. KF_RELEASE refusals in a row, more than the burst of wrong stereo the gate is there for
+ * (scene glitch has 10): the filter is what is wrong. */
+#define KF_RELEASE 12
+struct kf_lock {
+    int run;
+};
+/* Note one refused measurement; nonzero when the filter should start again from it. */
+int kf_refused(struct kf_lock *l);
+/* The normalized innovation of one axis alone, chi-square with one degree of freedom. */
+long double kf_axis_innovation(const struct kf *k, const long double *z, const long double *r33, int axis);
+#define KF_GATE_AXIS 10.83L /* chi-square, 1 degree of freedom, p = 0.001 */
+
 #endif

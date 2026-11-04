@@ -5,7 +5,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-static const char *const sc_names[VT_SC_COUNT] = {"none", "fb_max", "max_iter", "eps", "min_eig", "max_residual", "max_features", "q_accel", "r_floor", "sigma_c", "sigma_d", "prefetch", "max_missing", "reacq_ncc", "contrast", "pre_gauss", "debug_level"};
+static const char *const sc_names[VT_SC_COUNT] = {"none", "fb_max", "max_iter", "eps", "min_eig", "max_residual", "max_features", "q_accel", "r_floor", "sigma_c", "sigma_d", "prefetch", "max_missing", "reacq_ncc", "contrast", "pre_gauss", "debug_level", "fsr_sharp"};
 
 int run_opts_parse(struct run_opts *o, int argc, char **argv, struct dataset *ds)
 {
@@ -47,6 +47,23 @@ int run_opts_parse(struct run_opts *o, int argc, char **argv, struct dataset *ds
             c->height2 = (uint32_t)o->h;
         }
         else if (!strcmp(argv[i], "--framegen")) c->framegen = c->gen_pictures = 1;
+        else if (!strcmp(argv[i], "--fsr-up") && i + 1 < argc) {
+            int fw, fh;
+            if (sscanf(argv[++i], "%dx%d", &fw, &fh) != 2)
+                return 2;
+            c->fsr_up_w = (uint32_t)fw;
+            c->fsr_up_h = (uint32_t)fh;
+        }
+        else if (!strcmp(argv[i], "--fsr-sharp") && i + 1 < argc) c->fsr_sharp = (float)atof(argv[++i]);
+        else if (!strcmp(argv[i], "--fsr") && i + 1 < argc) {
+            int fw, fh;
+            if (sscanf(argv[++i], "%dx%d", &fw, &fh) != 2)
+                return 2;
+            c->framegen = c->gen_pictures = 1;
+            c->fsr_camera = 1;
+            c->fsr_w = (uint32_t)fw;
+            c->fsr_h = (uint32_t)fh;
+        }
         else if (OPT("--cores")) c->cores = (uint32_t)atoi(argv[++i]);
         else if (OPT("--tpc")) c->tpc = (uint32_t)atoi(argv[++i]);
         else if (OPT("--pipes")) c->pipelines = (uint32_t)atoi(argv[++i]);

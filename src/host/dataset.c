@@ -73,9 +73,9 @@ void dataset_roi(const struct dataset *d, int i, float *roi)
     scene_truth(&d->s, i, &t);
     /* Inside the object, except where the point of the scene is a box with background in it. */
     const enum scene_id id = d->s.id;
-    const double k = id == SC_OFFBOX ? 5.0 : id == SC_OFFJOINTED ? 4.5 : id == SC_SMALLBOX ? 4.0 : id == SC_BIGBOX || id == SC_STILLSTART || id == SC_ROTATE || id == SC_SWING || id == SC_COMEBACK || id == SC_JOINTED || id == SC_PASSBY || id == SC_DART ? 2.4 : 0.8;
+    const double k = id == SC_OFFBOX ? 5.0 : id == SC_OFFJOINTED ? 4.5 : id == SC_SMALLBOX ? 4.0 : id == SC_DUALBOX || id == SC_BIGBOX || id == SC_STILLSTART || id == SC_ROTATE || id == SC_SWING || id == SC_COMEBACK || id == SC_JOINTED || id == SC_PASSBY || id == SC_DART ? 2.4 : 0.8;
     /* The thing to one side of the box: wholly outside its middle half. */
-    const double aside = id == SC_OFFBOX ? 3.75 * t.half_w : id == SC_OFFJOINTED ? 3.333 * t.half_w : 0.0;
+    const double aside = id == SC_OFFBOX ? 3.75 * t.half_w : id == SC_OFFJOINTED ? 3.333 * t.half_w : id == SC_DUALBOX ? 0.5 * t.half_w : 0.0;
     roi[0] = (float)(t.u - aside - k * t.half_w);
     roi[1] = (float)(t.v - k * t.half_h);
     roi[2] = (float)(2.0 * k * t.half_w);
@@ -90,6 +90,13 @@ void dataset_roi_cam(const struct dataset *d, int i, int camera, float *roi)
     }
     struct truth t;
     scene_truth_at(&d->s, (double)i / d->s.fps + d->s.b_delay_s, &t);
+    if (d->s.id == SC_DUALBOX) {
+        roi[0] = (float)(t.ub + 0.7 * t.half_wb - 2.4 * t.half_wb);
+        roi[1] = (float)(t.vb - 0.3 * t.half_hb - 2.4 * t.half_hb);
+        roi[2] = (float)(4.8 * t.half_wb);
+        roi[3] = (float)(4.8 * t.half_hb);
+        return;
+    }
     roi[0] = (float)(t.ub - 0.8 * t.half_wb);
     roi[1] = (float)(t.vb - 0.8 * t.half_hb);
     roi[2] = (float)(1.6 * t.half_wb);

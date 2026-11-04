@@ -21,6 +21,9 @@ struct priv {
     Atom wm_delete;
 };
 
+static int no_frame;
+void x11view_noframe(int on) { no_frame = on; }
+
 int x11view_open(struct x11view *v, int w, int h, int x, int y, const char *title)
 {
     struct priv *p = calloc(1, sizeof *p);
@@ -37,6 +40,11 @@ int x11view_open(struct x11view *v, int w, int h, int x, int y, const char *titl
     Visual *vis = DefaultVisual(p->d, scr);
     p->win = XCreateSimpleWindow(p->d, RootWindow(p->d, scr), x < 0 ? 0 : x, y < 0 ? 0 : y, (unsigned)w, (unsigned)h, 0, 0, 0);
     XStoreName(p->d, p->win, title);
+    if (no_frame) {
+        const unsigned long hints[5] = {2ul, 0ul, 0ul, 0ul, 0ul}; /* _MOTIF_WM_HINTS: flags MWM_HINTS_DECORATIONS, decorations none */
+        const Atom motif = XInternAtom(p->d, "_MOTIF_WM_HINTS", False);
+        XChangeProperty(p->d, p->win, motif, motif, 32, PropModeReplace, (const unsigned char *)hints, 5);
+    }
     XSelectInput(p->d, p->win, KeyPressMask | ButtonPressMask | ButtonReleaseMask | PointerMotionMask | StructureNotifyMask);
     p->wm_delete = XInternAtom(p->d, "WM_DELETE_WINDOW", False);
     XSetWMProtocols(p->d, p->win, &p->wm_delete, 1);
@@ -271,5 +279,36 @@ void x11view_text(struct x11view *v, int x, int y, int s, uint32_t c, const char
             for (int row = 0; row < 8; row++)
                 if (g[col] >> row & 1)
                     x11view_fill(v, x + col * s, y + row * s, s, s, c);
+    }
+}
+
+void x11view_tint(struct x11view *v, const uint8_t *cover, int w, int y0, int y1, int x, int y, int mirror, uint32_t colour)
+{
+    const uint32_t cr = (colour >> 16) & 255u, cg = (colour >> 8) & 255u, cb = colour & 255u;
+    const int shown = w < v->w - x ? w : v->w - x;
+    for (int r = y0; r < y1 && y + r < v->h; r++) {
+        uint32_t *d = v->px + (size_t)(y + r) * (size_t)v->w + x;
+        const uint8_t *s = cover + (size_t)r * (size_t)w;
+        /* Almost every byte is zero: eight at a time past those. */
+        for (int c = 0; c < w;) {
+            if (c + 8 <= w) {
+                uint64_t word;
+                memcpy(&word, s + c, 8);
+                if (!word) {
+                    c += 8;
+                    continue;
+                }
+            }
+            const int end = c + 8 < w ? c + 8 : w;
+            for (; c < end; c++) {
+                const uint32_t a = s[c];
+                const int at = mirror ? w - 1 - c : c;
+                if (!a || at >= shown)
+                    continue;
+                const uint32_t p = d[at], n = 255u - a;
+                const uint32_t pr = (p >> 16) & 255u, pg = (p >> 8) & 255u, pb = p & 255u;
+                d[at] = ((pr * n + cr * a + 127u) / 255u) << 16 | ((pg * n + cg * a + 127u) / 255u) << 8 | ((pb * n + cb * a + 127u) / 255u);
+            }
+        }
     }
 }

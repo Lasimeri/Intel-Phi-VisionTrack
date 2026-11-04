@@ -94,10 +94,10 @@ int fuse_triangulate(const struct fuse *f, real ua, real va, real ub, real vb, r
     return 1;
 }
 
-/* The measurement's covariance: the two centres' image noise carried through the triangulation by differences. */
-static void meas_cov(const struct fuse *f, real ua, real va, real ub, real vb, const real *p, real *cov)
+/* The measurement's covariance, carried through the triangulation by differences: what differs from frame to frame, which a filter may average away, and the bias of each view's point, which it may not. */
+static void meas_cov(const struct fuse *f, real ua, real va, real ub, real vb, const real *p, real *white, real *bias)
 {
-    const real h = 0.5L, sig = f->sigma_c;
+    const real h = 0.5L, sig = f->sigma_c * f->sigma_c, var[4] = {f->obs[0].var_u, f->obs[0].var_v, f->obs[1].var_u, f->obs[1].var_v};
     real J[3][4];
     for (int k = 0; k < 4; k++) {
         real q[3], rp, dg;
@@ -107,15 +107,18 @@ static void meas_cov(const struct fuse *f, real ua, real va, real ub, real vb, c
     }
     for (int r = 0; r < 3; r++)
         for (int c = 0; c < 3; c++) {
-            real s = 0.0L;
-            for (int k = 0; k < 4; k++)
-                s += J[r][k] * J[c][k];
-            cov[3 * r + c] = s * sig * sig;
+            real s = 0.0L, b = 0.0L;
+            for (int k = 0; k < 4; k++) {
+                    s += J[r][k] * J[c][k];
+                    b += J[r][k] * J[c][k] * var[k];
+            }
+            white[3 * r + c] = s * sig;
+            bias[3 * r + c] = b;
         }
     const real fl = f->r_floor * f->r_floor;
-    cov[0] += fl;
-    cov[4] += fl;
-    cov[8] += fl;
+    white[0] += fl;
+    white[4] += fl;
+    white[8] += fl;
 }
 
 void fuse_frame(struct fuse *f, int camera, struct vt_result *r)
@@ -124,11 +127,23 @@ void fuse_frame(struct fuse *f, int camera, struct vt_result *r)
     struct fuse_obs *me = &f->obs[camera & 1];
     me->valid = seen;
     if (seen) {
-        me->u = (real)r->cx;
-        me->v = (real)r->cy;
+        me->u = (real)r->pt_x;
+        me->v = (real)r->pt_y;
         me->rate_u = (real)r->rate_u;
         me->rate_v = (real)r->rate_v;
         me->t_ns = r->hdr.acq_ns;
+        /* A box whose head has not moved: nothing says where in it the thing is. A quarter of its size is one sigma. */
+        me->at_rest = (r->flags & VT_F_AT_REST) != 0;
+        me->mid = (r->flags & VT_F_POINT_MID) != 0;
+        const real qw = me->at_rest ? 0.25L * (real)r->w : (real)r->pt_sx, qh = me->at_rest ? 0.25L * (real)r->h : (real)r->pt_sy;
+        me->var_u = qw * qw;
+        me->var_v = qh * qh;
+        /* A new selection is a new thing: nothing known of the last one applies. */
+        if (r->state == VT_ST_NEW) {
+            f->kf.valid = 0;
+            f->kf_unproven = 0;
+            f->lock.run = 0;
+        }
     }
     const uint64_t now = r->hdr.acq_ns;
     const real dt = f->last_ns && now > f->last_ns ? (real)(now - f->last_ns) * 1e-9L : 0.0L;
@@ -145,8 +160,12 @@ void fuse_frame(struct fuse *f, int camera, struct vt_result *r)
             const real ua = a->u + a->rate_u * gap, va = a->v + a->rate_v * gap;
             real p[3], rp, deg;
             if (fuse_triangulate(f, ua, va, b->u, b->v, p, &rp, &deg)) {
-                real cov[9];
-                meas_cov(f, ua, va, b->u, b->v, p, cov);
+                real white[9], bias[9], cov[9];
+                meas_cov(f, ua, va, b->u, b->v, p, white, bias);
+                for (int i = 0; i < 9; i++) {
+                    cov[i] = white[i] + bias[i];
+                    f->bias[i] = bias[i];
+                }
                 for (int i = 0; i < 3; i++)
                     r->meas[i] = (double)p[i];
                 for (int i = 0; i < 9; i++)
@@ -156,21 +175,42 @@ void fuse_frame(struct fuse *f, int camera, struct vt_result *r)
                 r->pair_gap_ms = (double)(gap * 1000.0L);
                 r->pair_ua = (float)ua;
                 r->pair_va = (float)va;
-                if (rp > f->max_reproj) {
+                const int unproven = a->at_rest || b->at_rest;
+                if (unproven)
+                    r->flags |= VT_F_UNPROVEN;
+                /* The first measure of the thing itself replaces whatever the filter learned before it. */
+                if (!unproven && f->kf_unproven) {
+                    f->kf.valid = 0;
+                    f->kf_unproven = 0;
+                }
+                /* Rays from two boxes need not meet: their width already says so. */
+                const real loose = a->mid || b->mid ? 3.0L * sqrtl(a->var_u + a->var_v + b->var_u + b->var_v) : 0.0L;
+                if (!unproven && rp > f->max_reproj + loose) {
                     r->flags |= VT_F_3D_REJECTED;
-                } else if (!f->kf.valid) {
-                    kf_init(&f->kf, p, cov, f->v0_sigma);
+                } else if (!f->kf.valid || unproven) {
+                    /* An unproven measure only says itself again: the same bias a hundred times over is not a hundred measurements. */
+                    kf_init(&f->kf, p, unproven ? cov : white, f->v0_sigma);
+                    f->kf_unproven = unproven;
+                    f->lock.run = 0;
                     r->flags |= VT_F_3D_MEASURED;
                     f->last_meas_ns = now;
                 } else {
-                    const real nis = kf_innovation(&f->kf, p, cov);
+                    const real nis = kf_innovation(&f->kf, p, white);
                     r->nis = (double)nis;
                     if (nis <= KF_GATE_NIS) {
-                        kf_update(&f->kf, p, cov);
+                        f->lock.run = 0;
+                        kf_update(&f->kf, p, white);
                         r->flags |= VT_F_3D_MEASURED;
                         f->last_meas_ns = now;
                     } else {
-                        r->flags |= VT_F_3D_REJECTED;
+                        if (kf_refused(&f->lock)) {
+                            kf_init(&f->kf, p, white, f->v0_sigma);
+                            f->lock.run = 0;
+                            r->flags |= VT_F_3D_MEASURED;
+                            f->last_meas_ns = now;
+                        } else {
+                            r->flags |= VT_F_3D_REJECTED;
+                        }
                     }
                 }
             }
@@ -188,8 +228,10 @@ void fuse_frame(struct fuse *f, int camera, struct vt_result *r)
             r->vel[i] = (double)f->kf.x[i + 3];
             r->vel_var[i] = (double)f->kf.P[i + 3][i + 3];
             for (int k = 0; k < 3; k++)
-                r->pos_cov[3 * i + k] = (double)f->kf.P[i][k];
+                r->pos_cov[3 * i + k] = (double)(f->kf.P[i][k] + (f->kf_unproven ? 0.0L : f->bias[3 * i + k]));
         }
         r->flags |= VT_F_METRIC;
+        if (f->kf_unproven)
+            r->flags |= VT_F_UNPROVEN;
     }
 }

@@ -10,6 +10,7 @@
 
 #include "detect.h"
 #include "framegen.h"
+#include "fsr3.h"
 #include "img.h"
 #include "kalman.h"
 #include "lk.h"
@@ -43,6 +44,11 @@
 #define OUT_PATIENCE 45          /* real frames unseen, and it has gone */
 #define RECENTRE_RATE 0.05L      /* of the way to the middle of the members, per frame, in a region whose point had to move onto the thing, */
 #define TURN_DEAD 0.25L          /* pixels at the features' typical radius: a smaller turn is noise, and would accumulate */
+#define AT_REST_SETTLE 3         /* frames after a selection in which nothing is claimed in 3D */
+#define POINT_RATE 0.1L          /* how fast the offset from the head to the thing's middle follows */
+#define POINT_OFF_SIGMAS 3.0L    /* the members' middle this many of its own sigmas from the box's centre: the box is not on the thing */
+#define POINT_OFF_SHARE 0.75L    /* and this many of its members' MADs, 3/16 of its width: a bias of the corners' spread is no sign of a box off the thing */
+#define INNER_SHARE 0.25L        /* each way from a box's middle, of its size: its inner half */
 #define SHAPELESS_MAD 1.0L       /* or whose features disagree typically by more than this, pixels: no rigid thing does, and a median of a thing changing shape wanders */
 #define PROVE_TRAVEL 2.0L        /* pixels, |u| + |v|: how far the head must have gone for a rider to be judged */
 #define PROVE_SHARE 0.5L         /* of that, the most a rider may differ from it and be going with it */
@@ -125,10 +131,21 @@ struct tracker {
     /* Frame generation. The pyramid goes on above the tracker's own levels, per set; the field starts at the tracker's level 1. */
     struct fg_job fg;
     struct vt_plane fg_more[3][FG_MAX_LEVELS];
-    int fg_levels, fg_hist_set, gen_skip;
+    int fg_levels, fg_hist_set;
+    struct box_at { uint32_t state; float cx, cy, w, h; } was, is; /* the region at the last two real frames: a generated row lies between them */
+    float pt_ox, pt_oy, pt_mx, pt_my, pt_sx, pt_sy; /* from the head to the point; from the head to the middle of its members, and that middle's scatter */
+    int pt_known, pt_off, kf_unproven; /* the offset has been read; the box is not on the thing; the filter holds what was measured from a box at rest */
+    struct kf_lock kf_lock;
     uint8_t fg_ready[3];
     void *fg_mem;
     uint64_t fg_cycles[9], fg_runs;
+    struct fsr *fsr;
+    struct job *jf;         /* FSR's orders: it may run beside the tracker, on a team of its own */
+    tk_run_fn run_fsr;
+    void *fsr_ctx;
+    uint8_t *fsr_pic[2];    /* the generated instant's, the real one's */
+    int fsr_which;
+    uint64_t fsr_cycles[FSR_STAGES + 1], fsr_runs;
     uint8_t *fg_pic; /* where a generated frame's picture goes, for the window; none: it stays for the tracker alone, and is made only for a region */
     uint64_t last_est_ns;
     /* filter */
@@ -138,7 +155,7 @@ struct tracker {
 
 /* ---- parallel jobs ---- */
 
-enum { OP_U8, OP_NORM_IN, OP_GAUSS_IN, OP_REDUCE, OP_DIFF, OP_LK, OP_STEREO, OP_SEARCH, OP_DET_TENSOR, OP_DET_RESPONSE, OP_DET_CELLS, OP_FG_MORE, OP_FG_HIST_A, OP_FG_HIST_B, OP_FG_SEARCH, OP_FG_FILTER, OP_FG_UP, OP_FG_MID, OP_FG_BLEND, OP_FG_PAD, OP_FG_PICTURE };
+enum { OP_U8, OP_NORM_IN, OP_GAUSS_IN, OP_REDUCE, OP_DIFF, OP_LK, OP_STEREO, OP_SEARCH, OP_DET_TENSOR, OP_DET_RESPONSE, OP_DET_CELLS, OP_FG_MORE, OP_FG_HIST_A, OP_FG_HIST_B, OP_FG_SEARCH, OP_FG_FILTER, OP_FG_UP, OP_FG_MID, OP_FG_BLEND, OP_FG_PAD, OP_FG_PICTURE, OP_FSR, OP_FSR_PICTURE, OP_FSR_MID };
 #define FG_CHUNK 16 /* blocks taken at a time */
 
 struct job {
@@ -357,6 +374,15 @@ static void job_main(void *arg, int tid, int n)
     }
     case OP_FG_PAD:
         img_pad_rows(&t->fg.out, row_of(t->fg.out.h, tid, n), row_of(t->fg.out.h, tid + 1, n));
+        break;
+    case OP_FSR:
+        fsr_stage(t->fsr, j->level, tid, n);
+        break;
+    case OP_FSR_MID:
+        fsr_mid_stage(t->fsr, tid, n);
+        break;
+    case OP_FSR_PICTURE:
+        fsr_picture(t->fsr, !t->fsr_which, t->fsr_pic[t->fsr_which], tid, n);
         break;
     case OP_FG_PICTURE:
         img_q6_to_u8_vx(&t->fg.out, t->fg_pic, row_of(t->fg.out.h, tid, n), row_of(t->fg.out.h, tid + 1, n));
@@ -600,7 +626,7 @@ void tk_fg_report(const struct tracker *t, const char *name, double cycles_per_u
 {
     if (!t->fg_runs)
         return;
-    static const char *const stage[9] = {"more", "scene", "search", "filter", "upscale", "mid", "blend", "pyramid", "picture"};
+    static const char *const stage[9] = {"more", "scene", "search", "filter", "upscale", "mid", "blend", "pad", "picture"};
     fprintf(stderr, "%s: frame generation, %llu frames, us each:", name, (unsigned long long)t->fg_runs);
     for (int i = 0; i < 9; i++)
         fprintf(stderr, " %s %.1f", stage[i], (double)t->fg_cycles[i] / (double)t->fg_runs / cycles_per_us);
@@ -622,11 +648,85 @@ static void fg_build_more(struct tracker *t, int set)
 
 void tk_set_picture(struct tracker *t, uint8_t *pixels) { t->fg_pic = pixels; }
 
+int tk_fsr_setup(struct tracker *t, int up_w, int up_h, int w, int h, long double sharpness, tk_alloc_fn alloc, void *ctx, uint8_t *pixels_generated, uint8_t *pixels_real, tk_run_fn run, void *run_ctx)
+{
+    t->jf = need(alloc, ctx, sizeof *t->jf);
+    if (!t->jf)
+        return -1;
+    t->jf->t = t;
+    t->run_fsr = run ? run : t->run_track;
+    t->fsr_ctx = run ? run_ctx : t->track_ctx;
+    /* Up to up_w x up_h and by Lanczos to w x h; or straight to w x h. */
+    const int fw = up_w ? up_w : w, fh = up_w ? up_h : h;
+    const int dw = up_w ? w : 0, dh = up_w ? h : 0;
+    void *m = need(alloc, ctx, fsr_bytes(t->w, t->h, fw, fh, dw, dh));
+    if (!m)
+        return -1;
+    t->fsr = fsr_init(m, t->w, t->h, fw, fh, dw, dh, sharpness);
+    if (!t->fsr)
+        return -1;
+    t->fsr_pic[0] = pixels_generated;
+    t->fsr_pic[1] = pixels_real;
+    return 0;
+}
+
+static void run_fsr_op(struct tracker *t, int op)
+{
+    struct job *j = t->jf;
+    j->op = op;
+    j->alg = VT_ALG_MVEX;
+    j->next = 0;
+    t->run_fsr(t->fsr_ctx, job_main, j);
+}
+
+void tk_fsr_frame(struct tracker *t)
+{
+    /* Real frames only, whole steps: nothing in the history is invented. The frame between two pictures is made afterwards, from the pictures: the user's order, 2026-11-03. */
+    struct job *j = t->jf;
+    uint64_t mark = vt_tsc();
+    const struct fg_job *g = &t->fg;
+    fsr_begin(t->fsr, &g->b0, &g->a0, &g->fil[0], 1.0L, g->scene_changed);
+    for (int s = 0; s < FSR_STAGES; s++) {
+        j->level = s;
+        run_fsr_op(t, OP_FSR);
+        fsr_stage_end(t->fsr, s);
+        const uint64_t now = vt_tsc();
+        t->fsr_cycles[s] += now - mark;
+        mark = now;
+    }
+    fsr_mid_begin(t->fsr, &g->mid);
+    run_fsr_op(t, OP_FSR_MID);
+    fsr_mid_end(t->fsr);
+    t->fsr_which = 1;
+    run_fsr_op(t, OP_FSR_PICTURE);
+    t->fsr_which = 0;
+    run_fsr_op(t, OP_FSR_PICTURE);
+    fsr_end(t->fsr);
+    t->fsr_cycles[FSR_STAGES] += vt_tsc() - mark;
+    t->fsr_runs++;
+}
+
+const struct fsr *tk_fsr_of(const struct tracker *t) { return t->fsr; }
+
+void tk_fsr_report(const struct tracker *t, const char *name, double cycles_per_us)
+{
+    if (!t->fsr_runs)
+        return;
+    static const char *const stage[FSR_STAGES + 1] = {"refine", "input", "hpass", "diff", "mip0", "mip1", "mip2", "sc", "react", "inst", "acc", "sharpen", "flow+pictures"};
+    double total = 0.0;
+    fprintf(stderr, "%s: FSR, %llu frames, us each:", name, (unsigned long long)t->fsr_runs);
+    for (int i = 0; i <= FSR_STAGES; i++) {
+        const double us = (double)t->fsr_cycles[i] / (double)t->fsr_runs / cycles_per_us;
+        total += us;
+        fprintf(stderr, " %s %.0f", stage[i], us);
+    }
+    fprintf(stderr, " total %.0f\n", total);
+}
+
 int tk_generate(struct tracker *t, int set, const struct vt_msg *m, struct vt_msg *gm)
 {
-    /* The window doubles every camera's picture whether or not anything is selected; the tracker wants one only for a region it can follow. */
-    const int active = (t->state == VT_ST_NEW || t->state == VT_ST_OBSERVED) && t->nf > 0;
-    if (!t->c.framegen || t->prev < 0 || t->prev == set || (!active && !t->fg_pic))
+    /* A generated frame is for the eye: the window doubles every camera whether or not anything is selected, and nothing else may read it. */
+    if (!t->c.framegen || !t->fg_pic || t->prev < 0 || t->prev == set)
         return -1;
     const int p = t->prev, g = (set + 1) % t->nsets;
     uint64_t mark = vt_tsc();
@@ -677,26 +777,14 @@ int tk_generate(struct tracker *t, int set, const struct vt_msg *m, struct vt_ms
     FG_LAP(6);
     run_track_op(t, OP_FG_PAD, VT_ALG_MVEX);
     img_pad_tb(&f->out);
-    /* The rest of its pyramid, as any frame's, if anything is going to read it. */
-    if (active) {
-        struct job *b = t->jp;
-        b->alg = VT_ALG_MVEX;
-        b->set = g;
-        b->cameras = 1;
-        for (int L = 1; L < t->levels; L++) {
-            run_build_op(t, OP_REDUCE, L);
-            img_pad_tb(&t->pyr[g][0].l[L]);
-        }
-    }
     FG_LAP(7);
-    if (t->fg_pic)
-        run_track_op(t, OP_FG_PICTURE, VT_ALG_MVEX);
+    run_track_op(t, OP_FG_PICTURE, VT_ALG_MVEX);
     FG_LAP(8);
 #undef FG_LAP
     *gm = *m;
     gm->cmd = VT_CMD_NONE;
     gm->sc_key = 0;
-    gm->dest = VT_PIPE_FLOW;
+    gm->dest = 0;
     gm->generated = 1;
     gm->acq_ns = t->last_acq_ns + (m->acq_ns - t->last_acq_ns) / 2u;
     return g;
@@ -873,6 +961,11 @@ static void look_there(struct tracker *t)
 /* Out of patience: no position is claimed any more, but what it looks like is kept, and it can come back. */
 static void lose_region(struct tracker *t)
 {
+    t->pt_known = 0;
+    t->pt_off = 0;
+    t->pt_ox = t->pt_oy = t->pt_mx = t->pt_my = t->pt_sx = t->pt_sy = 0.0f;
+    t->kf_unproven = 0;
+    t->kf_lock.run = 0;
     t->state = VT_ST_LOST;
     t->nf = 0;
     t->kf.valid = 0;
@@ -885,6 +978,11 @@ static void lose_region(struct tracker *t)
 
 static void end_region(struct tracker *t, uint32_t state)
 {
+    t->pt_known = 0;
+    t->pt_off = 0;
+    t->pt_ox = t->pt_oy = t->pt_mx = t->pt_my = t->pt_sx = t->pt_sy = 0.0f;
+    t->kf_unproven = 0;
+    t->kf_lock.run = 0;
     t->state = state;
     t->nf = 0;
     for (int i = 0; i < APP_SLOTS; i++)
@@ -934,15 +1032,13 @@ static void apply_command(struct tracker *t, const struct vt_msg *d, struct vt_r
 }
 
 /* A rate decays per real frame, however many are made between them. */
-static inline void predict_position(struct tracker *t, real dt, int generated)
+static inline void predict_position(struct tracker *t, real dt)
 {
     if (dt > 0.0L) {
         t->cx = (float)(R(t->cx) + R(t->rate_u) * dt);
         t->cy = (float)(R(t->cy) + R(t->rate_v) * dt);
-        if (!generated) {
-            t->rate_u = (float)(R(t->rate_u) * COAST_DAMP);
-            t->rate_v = (float)(R(t->rate_v) * COAST_DAMP);
-        }
+        t->rate_u = (float)(R(t->rate_u) * COAST_DAMP);
+        t->rate_v = (float)(R(t->rate_v) * COAST_DAMP);
     }
 }
 
@@ -1033,7 +1129,7 @@ static void region_gone(struct tracker *t, real dt)
     t->nf = 0;
     t->state = VT_ST_UNOBSERVED;
     t->missing++;
-    predict_position(t, dt, 0);
+    predict_position(t, dt);
 }
 
 /* What the flow says about the region; the head follows it.
@@ -1052,7 +1148,7 @@ static void region_from_flow(struct tracker *t, const struct vt_msg *d, real dt,
     static int idx[VT_MAX_FEATURES];
     static uint8_t vote[VT_MAX_FEATURES], keep[VT_MAX_FEATURES], with_head[VT_MAX_FEATURES];
     static float speed_u[VT_MAX_FEATURES], speed_v[VT_MAX_FEATURES], radii[VT_MAX_FEATURES];
-    const int min_f = (int)t->c.min_features, gen = d->generated != 0;
+    const int min_f = (int)t->c.min_features;
     int n = 0, votes = 0;
     memset(mu, 0, sizeof mu);
     memset(mv, 0, sizeof mv);
@@ -1091,16 +1187,13 @@ static void region_from_flow(struct tracker *t, const struct vt_msg *d, real dt,
                 votes++;
             }
     if (votes < min_f) {
-        if (gen)
-            t->gen_skip = 1;
-        else
-            region_gone(t, dt);
+        region_gone(t, dt);
         return;
     }
     int wake = 0;
     real at_rest_x = 0.0L, at_rest_y = 0.0L, wake_u = 0.0L, wake_v = 0.0L;
     t->look = 0;
-    if (!t->awake && !gen) {
+    if (!t->awake) {
         real x0 = 1e9L, y0 = 1e9L, x1 = -1e9L, y1 = -1e9L;
         int seen = 0, seen_moving = 0;
         for (int i = 0; i < t->nf; i++) {
@@ -1149,7 +1242,7 @@ static void region_from_flow(struct tracker *t, const struct vt_msg *d, real dt,
         for (int k = 0; k < n; k++) {
             const int i = idx[k];
             const int has = fabsl(R(mu[k])) + fabsl(R(mv[k])) > MOVE_MIN;
-            if (!gen && has && t->fage[i] < PROBATION - 1)
+            if (has && t->fage[i] < PROBATION - 1)
                 t->fborn[i] = 1;
             const int counts = has && !t->fborn[i];
             wt[k] = counts ? 1.0f : 0.0f;
@@ -1177,10 +1270,8 @@ static void region_from_flow(struct tracker *t, const struct vt_msg *d, real dt,
         } else if (t->awake && 2 * moved_votes >= votes) {
             ready = 1;
         }
-        if (!gen) {
-            t->wake_run = ready ? t->wake_run + 1 : 0;
-            wake = t->wake_run >= WAKE_FRAMES;
-        }
+        t->wake_run = ready ? t->wake_run + 1 : 0;
+        wake = t->wake_run >= WAKE_FRAMES;
         if (!wake) {
             /* At rest: every feature goes on, and nothing moves the window. */
             for (int k = 0; k < n; k++)
@@ -1263,8 +1354,7 @@ static void region_from_flow(struct tracker *t, const struct vt_msg *d, real dt,
                 tu[m++] = (float)(fabsl(R(du[k]) - cu - s * (R(px[k]) - R(t->cx)) + turn * (R(py[k]) - R(t->cy))) + fabsl(R(dv[k]) - cv - s * (R(py[k]) - R(t->cy)) - turn * (R(px[k]) - R(t->cx))));
         const real mad = R(select_median(tu, m));
         const real limit = mad * 3.0L > RESIDUAL_MIN ? mad * 3.0L : RESIDUAL_MIN;
-        if (!gen)
-            t->shapeless = mad > SHAPELESS_MAD;
+        t->shapeless = mad > SHAPELESS_MAD;
         for (int k = 0; k < n; k++) {
             const real off = fabsl(R(du[k]) - cu - s * (R(px[k]) - R(t->cx)) + turn * (R(py[k]) - R(t->cy))) + fabsl(R(dv[k]) - cv - s * (R(py[k]) - R(t->cy)) - turn * (R(px[k]) - R(t->cx)));
             keep[k] = off <= limit;
@@ -1276,47 +1366,6 @@ static void region_from_flow(struct tracker *t, const struct vt_msg *d, real dt,
     for (int k = 0; k < n; k++) {
         asked += vote[k];
         kept += vote[k] && keep[k];
-    }
-    /* A generated frame moves features and decides nothing: its pixels are invented, and an error in them must not cost a feature its place. One the flow lost on it goes with the head. */
-    if (gen) {
-        if (kept < min_f) {
-            t->gen_skip = 1;
-            return;
-        }
-        int k = 0;
-        for (int i = 0; i < t->nf; i++) {
-            if (t->flow[i].status) {
-                t->fu[i] = (float)cu;
-                t->fv[i] = (float)cv;
-                t->fx[i] = (float)(R(t->fx[i]) + cu);
-                t->fy[i] = (float)(R(t->fy[i]) + cv);
-            } else {
-                t->fu[i] = du[k];
-                t->fv[i] = dv[k];
-                t->fx[i] = t->flow[i].x;
-                t->fy[i] = t->flow[i].y;
-                t->fmu[i] = mu[k];
-                t->fmv[i] = mv[k];
-                k++;
-            }
-            t->fflag[i] &= ~(uint32_t)VT_FF_NEW;
-        }
-        o->inliers = asked ? (float)(R(kept) / R(asked)) : 0.0f;
-        t->cx = (float)(R(t->cx) + cu);
-        t->cy = (float)(R(t->cy) + cv);
-        t->rw = (float)(R(t->rw) * (1.0L + s));
-        t->rh = (float)(R(t->rh) * (1.0L + s));
-        t->gw = (float)(R(t->gw) * (1.0L + s));
-        t->gh = (float)(R(t->gh) * (1.0L + s));
-        o->scale = (float)s;
-        if (dt > 0.0L) {
-            t->rate_u = (float)(cu / dt);
-            t->rate_v = (float)(cv / dt);
-        }
-        o->du = (float)cu;
-        o->dv = (float)cv;
-        t->state = VT_ST_OBSERVED;
-        return;
     }
     /* Features that died in the flow do not count against those that lived: a fast, blurred thing loses most of its features every few frames and is still exactly where the rest say. */
     const real share = asked > 0 ? R(kept) / R(asked) : 0.0L;
@@ -1723,17 +1772,68 @@ static void stereo_one(struct tracker *t, int i, int alg, void *tile)
     t->fflag[i] = fl;
 }
 
-/* The region's 3D measurement from its features' points. Returns how many agreed. */
-static int region_measurement(struct tracker *t, real *z, real *r33, real *reproj)
+/* The point two views can triangulate. Once the head has moved only the thing's features are left, and they say whether the box is on it. A rigid thing's offset is constant, and a median jumps when a feature dies, so what they say is
+ * followed slowly. */
+static void read_point(struct tracker *t)
+{
+    static float xs[VT_MAX_FEATURES], ys[VT_MAX_FEATURES], off[VT_MAX_FEATURES];
+    if (!t->awake)
+        return;
+    int m = 0;
+    for (int i = 0; i < t->nf; i++)
+        if (t->fage[i] >= PROBATION) {
+            xs[m] = t->fx[i];
+            ys[m] = t->fy[i];
+            m++;
+        }
+    if (m < (int)t->c.min_features)
+        return;
+    const real mx = R(select_median(xs, m)), my = R(select_median(ys, m));
+    for (int k = 0; k < m; k++)
+        off[k] = (float)fabsl(R(xs[k]) - mx);
+    const real mad_x = R(select_median(off, m));
+    for (int k = 0; k < m; k++)
+        off[k] = (float)fabsl(R(ys[k]) - my);
+    const real mad_y = R(select_median(off, m));
+    /* A median's scatter over m samples: sqrt(pi / 2) x sigma / sqrt(m), sigma = 1.4826 MAD. */
+    const real root = sqrtl(R(m)), sx = 1.8581L * mad_x / root, sy = 1.8581L * mad_y / root, k = t->pt_known ? POINT_RATE : 1.0L;
+    t->pt_mx = (float)(R(t->pt_mx) + k * (mx - R(t->cx) - R(t->pt_mx)));
+    t->pt_my = (float)(R(t->pt_my) + k * (my - R(t->cy) - R(t->pt_my)));
+    t->pt_sx = (float)(R(t->pt_sx) + k * (sx - R(t->pt_sx)));
+    t->pt_sy = (float)(R(t->pt_sy) + k * (sy - R(t->pt_sy)));
+    t->pt_known = 1;
+    /* The box's centre is the better point while it agrees with its members: a median of corners scatters by several pixels, each view's its own way (scene dual: 14 mm from the centres, 74 mm from the medians). Once it plainly
+     * does not agree, the box was not drawn on the thing, and for the rest of this selection the members' middle is all there is. */
+    if ((fabsl(R(t->pt_mx)) > POINT_OFF_SIGMAS * R(t->pt_sx) && fabsl(R(t->pt_mx)) > POINT_OFF_SHARE * mad_x) || (fabsl(R(t->pt_my)) > POINT_OFF_SIGMAS * R(t->pt_sy) && fabsl(R(t->pt_my)) > POINT_OFF_SHARE * mad_y))
+        t->pt_off = 1;
+    t->pt_ox = t->pt_off ? t->pt_mx : 0.0f;
+    t->pt_oy = t->pt_off ? t->pt_my : 0.0f;
+}
+
+/* The region's 3D measurement. While the head has not moved, nothing says which part of the box is the thing: the depth comes from the box's inner half, where a box drawn round a thing has it, and the measure is unproven, with
+ * an uncertainty as wide as the box and the depth itself. Returns how many features agreed. */
+static int region_measurement(struct tracker *t, real *z, real *r33, real *reproj, int *unproven)
 {
     static float ds[VT_MAX_FEATURES], rp[VT_MAX_FEATURES];
+    const int at_rest = !t->awake;
+    /* Just selected: a thing may have no feature of its own yet, and every feature may agree on what is behind it. */
+    if (at_rest && t->frames_held < AT_REST_SETTLE)
+        return 0;
+    const real inner_x = INNER_SHARE * R(t->gw), inner_y = INNER_SHARE * R(t->gh);
     int n = 0;
-    for (int i = 0; i < t->nf; i++)
-        if ((t->fflag[i] & VT_FF_3D) && t->fage[i] >= PROBATION) {
-            ds[n] = t->fdisp[i];
-            rp[n] = (float)stereo_reprojection(&t->g, &t->p3[3 * i], t->fx[i], t->fy[i], t->fxr[i], t->fyr[i]);
-            n++;
-        }
+    for (int pass = 0; pass < 2 && n < (int)t->c.min_features; pass++) {
+        n = 0;
+        for (int i = 0; i < t->nf; i++)
+            if ((t->fflag[i] & VT_FF_3D) && t->fage[i] >= PROBATION) {
+                if (at_rest && !pass && (fabsl(R(t->fx[i]) - R(t->cx)) > inner_x || fabsl(R(t->fy[i]) - R(t->cy)) > inner_y))
+                    continue;
+                ds[n] = t->fdisp[i];
+                rp[n] = (float)stereo_reprojection(&t->g, &t->p3[3 * i], t->fx[i], t->fy[i], t->fxr[i], t->fyr[i]);
+                n++;
+            }
+        if (!at_rest)
+            break;
+    }
     if (n < (int)t->c.min_features)
         return 0;
     *reproj = R(select_median(rp, n));
@@ -1753,8 +1853,16 @@ static int region_measurement(struct tracker *t, real *z, real *r33, real *repro
      * so the effective count is n / 4, at least 1. Fitted against truth: docs/measurements.md. */
     const real neff = n >= 4 ? R(n) / 4.0L : 1.0L;
     const real sd = R(t->c.sigma_d), sc = R(t->c.sigma_c);
-    const real var_d = 1.5708L * 1.4826L * 1.4826L * madd * madd / neff + sd * sd;
-    stereo_covariance(&t->g, z, d, sc * sc, sc * sc, var_d, r33);
+    real var_d = 1.5708L * 1.4826L * 1.4826L * madd * madd / neff + sd * sd, var_u = sc * sc, var_v = sc * sc;
+    *unproven = at_rest;
+    /* Nothing has shown which part of the box is the thing. Its centre is no measurement of it, it may already be moving, and the depth is the inner half's: the thing may hold no feature with a depth at all (scenes offbox, dart: 12 m, all agreeing, against 4 m). All of it is stated as unknown. */
+    if (at_rest) {
+        const real qw = 0.25L * R(t->gw), qh = 0.25L * R(t->gh);
+        var_u += qw * qw;
+        var_v += qh * qh;
+        var_d += d * d;
+    }
+    stereo_covariance(&t->g, z, d, var_u, var_v, var_d, r33);
     const real floor2 = R(t->c.r_floor) * R(t->c.r_floor);
     r33[0] += floor2;
     r33[4] += floor2;
@@ -1799,6 +1907,10 @@ static void apply_soft_config(struct tracker *t, const struct vt_msg *m, struct 
     case VT_SC_PREFETCH: t->lk.prefetch = v != 0.0f; break;
     case VT_SC_MAX_MISSING: t->c.max_missing = (uint32_t)v; break;
     case VT_SC_REACQ_NCC: t->c.reacq_ncc = v; break;
+    case VT_SC_FSR_SHARP:
+        if (t->fsr)
+            fsr_set_sharpness(t->fsr, R(v));
+        break;
     case VT_SC_DEBUG_LEVEL:
         t->debug_level = v >= 0.0f && (int)v < t->levels ? (int)v : -1;
         break;
@@ -1841,10 +1953,6 @@ void tk_track(struct tracker *t, int set, const struct vt_msg *d, struct vt_resu
         o->motion = (float)(sum / (R(t->w & ~15) * R(t->h)) / R(VT_Q6));
     }
 
-    const int gen = d->generated != 0;
-    t->gen_skip = 0;
-    if (gen)
-        o->flags |= VT_F_GENERATED;
     const real dt = t->last_acq_ns ? R(d->acq_ns - t->last_acq_ns) * 1e-9L : 0.0L;
     /* The filter runs on real frames only, and its clock is theirs. */
     const real dt_est = t->last_est_ns ? R(d->acq_ns - t->last_est_ns) * 1e-9L : 0.0L;
@@ -1867,13 +1975,13 @@ void tk_track(struct tracker *t, int set, const struct vt_msg *d, struct vt_resu
     if (do_flow) {
         region_from_flow(t, d, dt, o);
     } else if (t->state == VT_ST_UNOBSERVED) {
-        t->missing += !gen;
-        predict_position(t, dt, gen);
+        t->missing++;
+        predict_position(t, dt);
     }
     if (d->cmd != VT_CMD_NONE)
         apply_command(t, d, o);
     /* A region that left its flow: take it back from its appearance. Past its patience no position is claimed any more, and the search goes on over the whole picture until the operator says otherwise. */
-    if ((t->state == VT_ST_UNOBSERVED || t->state == VT_ST_LOST) && !gen) {
+    if (t->state == VT_ST_UNOBSERVED || t->state == VT_ST_LOST) {
         if (try_reacquire(t, alg, o)) {
             t->state = VT_ST_OBSERVED;
             t->missing = 0;
@@ -1882,7 +1990,7 @@ void tk_track(struct tracker *t, int set, const struct vt_msg *d, struct vt_resu
             lose_region(t);
         }
     }
-    if (t->state == VT_ST_OBSERVED && !(o->flags & VT_F_REACQUIRED) && !gen) {
+    if (t->state == VT_ST_OBSERVED && !(o->flags & VT_F_REACQUIRED)) {
         /* Replace features as they die, but not every frame: a region with few corners stays below the line for good, and detection cost 7.2 ms a frame on real video
          * (camcorder, 275 x 320 region, 2026-11-02). Every 16th frame, or at once when the region is close to being unobservable. Refresh the appearance only from a clean frame. */
         int held = 0;
@@ -1915,15 +2023,16 @@ void tk_track(struct tracker *t, int set, const struct vt_msg *d, struct vt_resu
     const uint64_t t2 = vt_tsc();
     o->cycles[VT_T_REGION] = t2 - t1;
 
+    read_point(t);
     /* Stereo. */
     real z[3] = {0.0L, 0.0L, 0.0L}, r33[9] = {0.0L}, reproj = 0.0L;
-    int n3 = 0, ambiguous = 0;
+    int n3 = 0, ambiguous = 0, unproven = 0;
     const int has_feat = (t->state == VT_ST_NEW || t->state == VT_ST_OBSERVED) && t->nf > 0;
     if (want_stereo && has_feat) {
         run_track_op(t, OP_STEREO, alg);
         for (int i = 0; i < t->nf; i++)
             ambiguous += (t->fflag[i] & VT_FF_AMBIGUOUS) != 0;
-        n3 = region_measurement(t, z, r33, &reproj);
+        n3 = region_measurement(t, z, r33, &reproj, &unproven);
     }
     const uint64_t t3 = vt_tsc();
     o->cycles[VT_T_STEREO] = t3 - t2;
@@ -1940,19 +2049,38 @@ void tk_track(struct tracker *t, int set, const struct vt_msg *d, struct vt_resu
             for (int i = 0; i < 9; i++)
                 o->meas_cov[i] = (double)r33[i];
             o->reproj_rms = (double)reproj;
-            if (!t->kf.valid) {
+            if (unproven)
+                o->flags |= VT_F_UNPROVEN;
+            /* The first measure of the thing itself replaces whatever the filter learned before it. */
+            if (!unproven && t->kf_unproven) {
+                t->kf.valid = 0;
+                t->kf_unproven = 0;
+            }
+            /* An unproven measure only says itself again: the same bias a hundred times over is not a hundred measurements, and must not read as if it were. */
+            if (!t->kf.valid || unproven) {
                 kf_init(&t->kf, z, r33, R(t->c.v0_sigma));
                 o->flags |= VT_F_3D_MEASURED;
                 t->last_meas_ns = d->acq_ns;
+                t->kf_unproven = unproven;
+                t->kf_lock.run = 0;
             } else {
                 const real nis = kf_innovation(&t->kf, z, r33);
                 o->nis = (double)nis;
                 if (nis <= KF_GATE_NIS) {
+                    t->kf_lock.run = 0;
                     kf_update(&t->kf, z, r33);
                     o->flags |= VT_F_3D_MEASURED;
                     t->last_meas_ns = d->acq_ns;
                 } else {
-                    o->flags |= VT_F_3D_REJECTED;
+                    /* Stereo gone wrong moves the depth. A depth that agrees with a position that does not is a thing moving faster than the filter's model, and the position comes from the flow. */
+                    if (kf_axis_innovation(&t->kf, z, r33, 2) <= KF_GATE_AXIS || kf_refused(&t->kf_lock)) {
+                        kf_init(&t->kf, z, r33, R(t->c.v0_sigma));
+                        t->kf_lock.run = 0;
+                        o->flags |= VT_F_3D_MEASURED;
+                        t->last_meas_ns = d->acq_ns;
+                    } else {
+                        o->flags |= VT_F_3D_REJECTED;
+                    }
                 }
             }
         }
@@ -1974,6 +2102,8 @@ void tk_track(struct tracker *t, int set, const struct vt_msg *d, struct vt_resu
                         o->pos_cov[3 * i + k] = (double)t->kf.P[i][k];
                 }
                 o->flags |= VT_F_METRIC;
+                if (t->kf_unproven)
+                    o->flags |= VT_F_UNPROVEN;
             }
         }
     }
@@ -1992,6 +2122,14 @@ void tk_track(struct tracker *t, int set, const struct vt_msg *d, struct vt_resu
         o->cy = t->cy;
         o->w = t->rw;
         o->h = t->rh;
+        o->pt_x = (float)(R(t->cx) + R(t->pt_ox));
+        o->pt_y = (float)(R(t->cy) + R(t->pt_oy));
+        o->pt_sx = t->pt_sx;
+        o->pt_sy = t->pt_sy;
+        if (t->pt_off && !t->c.stereo)
+            o->flags |= VT_F_POINT_MID;
+        if (t->state != VT_ST_UNOBSERVED && !t->awake)
+            o->flags |= VT_F_AT_REST;
         o->rate_u = t->rate_u;
         o->rate_v = t->rate_v;
         if (t->state == VT_ST_UNOBSERVED && (t->cx < 0.0f || t->cy < 0.0f || t->cx >= (float)t->w || t->cy >= (float)t->h))
@@ -2030,7 +2168,64 @@ void tk_track(struct tracker *t, int set, const struct vt_msg *d, struct vt_resu
         o->debug_h = (uint32_t)pl->h;
         o->debug_stride = (uint32_t)pl->stride;
     }
-    if (!t->gen_skip)
-        t->prev = set;
+    t->prev = set;
+    t->was = t->is;
+    t->is = (struct box_at){.state = t->state, .cx = t->cx, .cy = t->cy, .w = t->rw, .h = t->rh};
     o->cycles[VT_T_TRACK] = vt_tsc() - t0;
+}
+
+/* ---- a generated frame's row ---- */
+
+static inline int box_seen(uint32_t state) { return state == VT_ST_NEW || state == VT_ST_OBSERVED; }
+static inline int box_has_place(uint32_t state) { return box_seen(state) || state == VT_ST_UNOBSERVED; }
+
+void tk_generated_result(const struct tracker *t, const struct vt_msg *gm, const struct vt_result *newer, struct vt_result *o)
+{
+    memset(o, 0, offsetof(struct vt_result, feat));
+    o->hdr = *gm;
+    o->hdr.type = VT_MSG_RESULT;
+    o->hdr.check = 0;
+    o->debug_level = -1;
+    o->track_id = newer->track_id;
+    o->last_obs_ns = newer->last_obs_ns;
+    o->flags = VT_F_GENERATED;
+    const struct box_at *a = &t->was;
+    const uint32_t now = newer->state;
+    /* Seen at its instant only if seen on both sides of it. Otherwise the worse of the two words stands: a thing taken back at the newer frame was not seen before it. */
+    const int both = box_seen(a->state) && box_seen(now);
+    const uint32_t state = both ? VT_ST_OBSERVED : box_seen(a->state) ? now : a->state;
+    o->state = state;
+    o->missing = state == VT_ST_UNOBSERVED ? newer->missing : 0u;
+    if (state == VT_ST_UNOBSERVED)
+        o->flags |= VT_F_PREDICTED;
+    if (box_has_place(state)) {
+        /* The middle of the two real boxes, when both are places it can have passed through. After a stretch of prediction the older is only a guess, and the newer, once taken back, is the one thing known. */
+        const int mid = box_has_place(a->state) && box_has_place(now) && !(newer->flags & VT_F_REACQUIRED && !box_seen(a->state));
+        const int from_now = !mid && box_has_place(now);
+        const struct box_at b = {.cx = newer->cx, .cy = newer->cy, .w = newer->w, .h = newer->h};
+        const struct box_at *one = from_now ? &b : a, *two = mid ? &b : one;
+        o->cx = (float)(0.5L * (R(one->cx) + R(two->cx)));
+        o->cy = (float)(0.5L * (R(one->cy) + R(two->cy)));
+        o->w = (float)(0.5L * (R(one->w) + R(two->w)));
+        o->h = (float)(0.5L * (R(one->h) + R(two->h)));
+        o->pt_x = (float)(R(o->cx) + R(newer->pt_x) - R(newer->cx));
+        o->pt_y = (float)(R(o->cy) + R(newer->pt_y) - R(newer->cy));
+        o->rate_u = newer->rate_u;
+        o->rate_v = newer->rate_v;
+    }
+    if (state == VT_ST_OBSERVED) {
+        o->inliers = newer->inliers;
+        o->quality = newer->quality;
+        o->nfeat = newer->nfeat;
+        o->nfeat_3d = newer->nfeat_3d;
+        /* Each feature half a step back along its own real step: nothing here was measured on the invented picture. */
+        for (uint32_t i = 0; i < newer->nfeat; i++) {
+            o->feat[i] = newer->feat[i];
+            o->feat[i].x = (float)(R(newer->feat[i].x) - 0.5L * R(newer->feat[i].u));
+            o->feat[i].y = (float)(R(newer->feat[i].y) - 0.5L * R(newer->feat[i].v));
+            o->feat[i].u = (float)(0.5L * R(newer->feat[i].u));
+            o->feat[i].v = (float)(0.5L * R(newer->feat[i].v));
+        }
+    }
+    o->hdr.length = (uint32_t)tk_result_bytes(o);
 }

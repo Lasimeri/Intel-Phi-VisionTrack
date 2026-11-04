@@ -28,11 +28,18 @@ int tk_sets(const struct tracker *t);
 void tk_build(struct tracker *t, int set, const uint8_t *left, const uint8_t *right, const struct vt_msg *m);
 /* The rest of a frame, whose pyramid is complete in `set`. out is complete on return, except the cycle counts of the stages outside it. Thread: the track group's tid 0. */
 void tk_track(struct tracker *t, int set, const struct vt_msg *m, struct vt_result *out);
-/* After tk_build of a real frame into `set` and before its tk_track: makes the frame half way between it and the last real one, if frame generation is on and a region exists to gain from it. Returns the set it is in, to
- * pass to tk_track with the message written to *gm, or -1 if there is none. A session of three sets, with real frame k in set k mod 3, the generated frame takes the set frame k + 1 will overwrite. */
+/* After tk_build of a real frame into `set` and before its tk_track: makes the picture half way between it and the last real one, written to what tk_set_picture named, and fills *gm with its message. Returns the set its
+ * plane lives in, or -1 if there is none. A generated picture is for the eye and nothing else reads it: the tracker follows real frames only, so a real row is the same with generation on or off, to the bit. */
 int tk_generate(struct tracker *t, int set, const struct vt_msg *m, struct vt_msg *gm);
-/* From now on every generated frame's picture is written to these w x h bytes, 64 B aligned, and a frame is generated whether a region exists or not. */
+/* After tk_track of the same real frame, whose result is `newer`: what the tracker says of the generated picture. Its box is the middle of the two real boxes around it, its features half a step back along their real steps. */
+void tk_generated_result(const struct tracker *t, const struct vt_msg *gm, const struct vt_result *newer, struct vt_result *o);
+/* From now on every generated frame's picture is written to these w x h bytes, 64 B aligned. Without this no frame is generated. */
 void tk_set_picture(struct tracker *t, uint8_t *pixels);
+/* This tracker's camera goes through FSR 3 (src/kern/fsr3.h): up to up_w x up_h and by Lanczos to w x h, or with up_w 0 straight to w x h. tk_fsr_frame: after a tk_generate of a real frame that returned a set: the real picture in pixels_real, and the one half way from the last, by flow, in pixels_generated. */
+int tk_fsr_setup(struct tracker *t, int up_w, int up_h, int w, int h, long double sharpness, tk_alloc_fn alloc, void *ctx, uint8_t *pixels_generated, uint8_t *pixels_real, tk_run_fn run, void *run_ctx);
+void tk_fsr_frame(struct tracker *t);
+void tk_fsr_report(const struct tracker *t, const char *name, double cycles_per_us);
+const struct fsr *tk_fsr_of(const struct tracker *t);
 /* The appearance correlation of a zero-mean template of 32 x 21 against a plane at (x, y): what the search for a lost region is built on, exposed for its gate. */
 struct vt_plane;
 long double tk_correlate(const struct vt_plane *pl, const float *app, long double norm, int x, int y);

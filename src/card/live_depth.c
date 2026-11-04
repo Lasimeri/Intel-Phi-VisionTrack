@@ -285,27 +285,60 @@ static void attitude_tick(struct live_depth *l, int cam)
     t->cycles = vt_tsc() - t0;
 }
 
-void ld_frame(struct live_depth *l, int cam, const struct vt_plane *cur)
+void ld_vectors(struct live_depth *l, int cam, const struct vt_plane *cur, struct team *tm)
 {
     struct frame_job j = {l->st[cam], cur};
     const uint64_t t0 = vt_tsc();
     if (!still_first(j.s)) {
-        team_run(l->tm, team_vectors, &j);
+        team_run(tm, team_vectors, &j);
         img_fence();
     }
     const uint64_t t1 = vt_tsc();
     still_decide(j.s);
-    team_run(l->tm, team_update, &j);
+    l->cycles_vectors[cam] = t1 - t0;
+    l->cycles_mean[cam] = vt_tsc() - t1;
+}
+
+void ld_update(struct live_depth *l, int cam, const struct vt_plane *cur, struct team *tm)
+{
+    struct frame_job j = {l->st[cam], cur};
+    const uint64_t t1 = vt_tsc();
+    team_run(tm, team_update, &j);
     img_fence();
     still_finish(j.s);
-    const uint64_t t2 = vt_tsc();
-    l->cycles_vectors[cam] = t1 - t0;
-    l->cycles_mean[cam] = t2 - t1;
+    l->cycles_mean[cam] += vt_tsc() - t1;
+}
+
+void ld_attitude(struct live_depth *l, int cam)
+{
     struct ld_att *t = &l->att[cam];
     if (++t->frames >= (cam == 2 ? ATT_FRAMES_D : ATT_FRAMES_L_R)) {
         t->frames = 0;
         attitude_tick(l, cam);
     }
+}
+
+void ld_rest(struct live_depth *l, int cam, const struct vt_plane *cur)
+{
+    ld_update(l, cam, cur, l->tm);
+    ld_attitude(l, cam);
+}
+
+void ld_frame(struct live_depth *l, int cam, const struct vt_plane *cur)
+{
+    ld_vectors(l, cam, cur, l->tm);
+    ld_rest(l, cam, cur);
+}
+
+size_t ld_cell_bytes(const struct live_depth *l, int cam) { return still_cell_bytes(l->st[cam]); }
+
+const struct vt_cell *ld_cells(const struct live_depth *l, int cam, int *cols, int *rows)
+{
+    struct vt_motion m;
+    still_motion(l->st[cam], &m);
+    *cols = (int)m.cols;
+    *rows = (int)m.rows;
+    return still_cells(l->st[cam]);
 }
 
 struct norm_job {

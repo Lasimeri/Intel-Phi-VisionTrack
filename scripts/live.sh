@@ -9,7 +9,7 @@ mkdir -p logs/live out/run
 log="logs/live/$(date +%Y%m%d-%H%M%S).log"
 echo "live: log $log"
 scripts/vtrackd.sh stop >/dev/null 2>&1 || true
-scripts/vtrackd.sh start 512 >>"$log" 2>&1
+scripts/vtrackd.sh start 1024 >>"$log" 2>&1
 at=""
 args=()
 while (($#)); do
@@ -40,7 +40,7 @@ while kill -0 "$view_pid" 2>/dev/null; do
         echo "live: new card code, restarting vtrackd on the card ($(date +%T))" | tee -a "$log"
         scripts/vtrackd.sh stop >>"$log" 2>&1 || true
         # A start that fails must not take the window with it: try again on the next look.
-        if ! scripts/vtrackd.sh start 512 >>"$log" 2>&1; then
+        if ! scripts/vtrackd.sh start 1024 >>"$log" 2>&1; then
             echo "live: the card program did not start, trying again ($(date +%T))" | tee -a "$log"
             card_t=0
         fi
