@@ -36,7 +36,10 @@ int main(void)
     const float zero[3] = {0.0f, 0.0f, 0.0f};
     const float box[4] = {320.0f, 200.0f, 640.0f, 500.0f};
     check(step(&g, cells, box, zero, zero) == GIM_NONE, "nothing held still yet: no windows, no reading");
-    for (int i = 0; i < 20; i++)
+    for (int i = 0; i < 12; i++)
+        step(&g, cells, box, zero, zero);
+    check(g.nwin == 0, "a second still is not enough: a person sits still that long");
+    for (int i = 0; i < 160; i++)
         step(&g, cells, box, zero, zero);
     check(g.nwin == VT_GIM_WINDOWS, "a moment later, all its windows");
     int clear = 1;
@@ -64,9 +67,25 @@ int main(void)
     check(slow, "slow drift is absorbed, not followed");
     for (int i = 0; i < 40; i++)
         step(&g, cells, box, zero, zero);
+    /* Something in view: the windows all read a move, but only a fifth of what was still moved. A person with all three windows on them, as measured live. */
+    const float big_u[3] = {3.0f, 3.0f, 3.0f}, big_v[3] = {1.5f, 1.5f, 1.5f};
+    for (int i = 0; i < COLS * ROWS / 5; i++)
+        cells[i].state = VT_CELL_CHANGED | VT_CELL_MOVING;
+    check(step(&g, cells, box, big_u, big_v) != GIM_MOVED && g.move_u == 0.0L, "all windows reading a move, the rest of the picture still: not a move");
+    for (int i = 0; i < COLS * ROWS; i++)
+        cells[i].state = 0;
+    for (int i = 0; i < 170; i++)
+        step(&g, cells, box, zero, zero);
+    /* The camera: the whole picture moved. */
+    for (int i = 0; i < COLS * ROWS; i++)
+        cells[i].state = VT_CELL_CHANGED | VT_CELL_MOVING;
     /* A step: 3 px of the level, 1.5 down: 6 and 3 of the camera. */
     const float su[3] = {3.0f, 3.0f, 3.0f}, sv[3] = {1.5f, 1.5f, 1.5f};
     check(step(&g, cells, box, su, sv) == GIM_MOVED && fabsl(g.move_u - 6.0L) < 0.5L && fabsl(g.move_v - 3.0L) < 0.5L, "a move comes through, in the camera's pixels");
+    for (int i = 0; i < COLS * ROWS; i++)
+        cells[i].state = 0;
+    for (int i = 0; i < 170; i++)
+        step(&g, cells, box, zero, zero);
     check(step(&g, cells, box, zero, zero) == GIM_STILL && g.move_u == 0.0L, "once");
     /* Two agreeing are not enough for a move: something large can cross two. */
     const float two_u[3] = {4.0f, 4.0f, 0.0f};

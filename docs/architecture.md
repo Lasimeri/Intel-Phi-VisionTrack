@@ -110,7 +110,7 @@ FSR 3's interpolation leans on a game's own motion vectors, which a camera does 
 
 ### Camera D through FSR (the operator's order, 2026-11-03)
 
-720p at 12 frames a second goes up to 1440p by FSR 3.1.6 (`src/kern/fsr3.c`), on real frames only, so nothing invented enters its history. Flow makes the frame half way from the two finished pictures, 1440p24. A Lanczos brings both to 1080p. FSR has its own team on each core's third and fourth hardware threads: it slows the tracker while both run, the tracker never waits for it, and it lets a frame go if it is still busy. The tracker follows the raw frames.
+720p at 15 frames a second goes up to 1440p by FSR 3.1.6 (`src/kern/fsr3.c`), on real frames only, so nothing invented enters its history. Flow makes the frame half way from the two finished pictures, 1440p30. A Lanczos brings both to 1080p. FSR has its own team on each core's third and fourth hardware threads: it slows the tracker while both run, the tracker never waits for it, and it lets a frame go if it is still busy. The tracker follows the raw frames.
 
 One channel, one vector a block, no gather: each source row is filtered across once, by permute tables, and an output row mixes four of them; a still block reads its history directly. There is no vector divide on this card and its reciprocal instruction is an approximation, so division and square root are Newton steps from the bits, the same on card and host.
 

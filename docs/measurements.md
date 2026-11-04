@@ -832,3 +832,15 @@ Applied, 1,270 frames, 106 s: **0 moves, the head moved by +0.00, +0.00 px**, 3 
 A picture jumping 6, 3 px at frame 70 of `hold`, host: told a frame late, as the spare core is, the window goes +6.00, +3.00 and the head stays stopped; not told, the window goes +5.99, +3.05 only because the jump starts the head. On `bigbox`, whose head was already moving, being told changes nothing, to the bit.
 
 Every result hash of all 27 scenes is that of the build before, on the host, and they hold their tolerances. Card = host on `hold`, `bigbox`, `dart`, `passby`, `dual`, and `bigbox` through FSR.
+
+## L and R at native 30, D at 15 doubled to 30 (the operator's order, 2026-11-03 20:02; `logs/live/rates-20261103-200336.csv`, `gim-20261103-200706.csv`, shown csvs)
+
+| Cells moving | Seconds | Shown L, R, D | Capture to result, ms |
+| --- | --- | --- | --- |
+| under 300 | 228 | 29.5, 29.5, 22.4 | 31.18 |
+| 300 to 800 | 43 | 30.0, 30.0, 21.0 | 31.77 |
+| over 800 | 88 | 29.9, 30.0, 19.3 | 32.01 |
+
+Over the last 30 s: 30.00, 30.03, 21.50 shown a second, capture to screen 46.3, 51.3, 192.9 ms. D's exposure 58.8 ms at its own 15, gain 32. Capture to result was 41 ms, and to screen on L and R about 80 ms, with L and R doubled.
+
+**D's reference, corrected twice by what it did live.** With three 128 px windows held for a second it reported 5 moves in 1,380 frames with no camera moved: smooth ramps of 0.4, 2.8, 6.6 px over ten frames, 150 to 260 cells moving, all three windows on a person. The 0 of 1,270 before was luck. Holding ten seconds, and needing half of everything long still to have moved in that frame, gave 0 of 1,621, the share reaching 17.3 % at most over 41 s of heavy motion, but only one window on two frames in three. At 64 px, two windows enough: 0 moves in 3603 frames, two or more windows on 95.0 %, three on 83.0 %. In all, 5,374 frames: one move, 2.76 px, a share of 67.3 % with reading ramping over six frames: very likely a person again.

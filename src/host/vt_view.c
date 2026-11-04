@@ -355,7 +355,7 @@ static void session_config(struct vt_config *c)
         c->flow_level = (uint32_t)A.flow_level;
         c->framegen = (uint32_t)A.framegen;
         c->gen_pictures = (uint32_t)A.framegen;
-        /* 720p12 doubled to 24 a second by the flow, at that size, every frame up to 1440p by FSR, and a Lanczos to 1080p: the user's order, 2026-11-03. */
+        /* 720p15 doubled to 30 a second by the flow, at that size, every frame up to 1440p by FSR, and a Lanczos to 1080p: the user's order, 2026-11-03. */
         if (A.fsr && A.framegen) {
             c->fsr_camera = 3;
             c->fsr_up_w = 2u * (uint32_t)A.c[2].w;
@@ -709,7 +709,7 @@ static void *link_main(void *arg)
                 strftime(path, sizeof path, "logs/live/gim-%Y%m%d-%H%M%S.csv", &tm);
                 gim_csv = fopen(path, "w");
                 if (gim_csv)
-                    fprintf(gim_csv, "instance,state,windows,lines,read_u,read_v,move_u,move_v,gim_us,total_u,total_v,box_from_ref_u,box_from_ref_v\n");
+                    fprintf(gim_csv, "instance,state,windows,lines,read_u,read_v,move_u,move_v,gim_us,total_u,total_v,box_from_ref_u,box_from_ref_v,share\n");
             }
             if (gim_csv) {
                 /* Where D's box is, from the middle of its windows: its position against what holds still. */
@@ -724,7 +724,7 @@ static void *link_main(void *arg)
                 A.gim_from_u = d_box ? (double)rd->cx - ref_mx / ref_n : 0.0;
                 A.gim_from_v = d_box ? (double)rd->cy - ref_my / ref_n : 0.0;
                 A.gim_from_ok = d_box;
-                fprintf(gim_csv, "%llu,%u,%u,%u,%.4f,%.4f,%.4f,%.4f,%.0f,%.3f,%.3f,%.2f,%.2f\n", (unsigned long long)vm.instance, vm.gim_state, vm.gim_windows, vm.lines, (double)vm.gim_read_u, (double)vm.gim_read_v, (double)vm.gim_move_u, (double)vm.gim_move_v, (double)vm.cycles_gim * 1e6 / TSC_HZ, (double)vm.gim_total_u, (double)vm.gim_total_v, A.gim_from_u, A.gim_from_v);
+                fprintf(gim_csv, "%llu,%u,%u,%u,%.4f,%.4f,%.4f,%.4f,%.0f,%.3f,%.3f,%.2f,%.2f,%u\n", (unsigned long long)vm.instance, vm.gim_state, vm.gim_windows, vm.lines, (double)vm.gim_read_u, (double)vm.gim_read_v, (double)vm.gim_move_u, (double)vm.gim_move_v, (double)vm.cycles_gim * 1e6 / TSC_HZ, (double)vm.gim_total_u, (double)vm.gim_total_v, A.gim_from_u, A.gim_from_v, vm.gim_share);
                 fflush(gim_csv);
             }
             if (vm.slot < VT_VEC_SLOTS) {
@@ -1418,21 +1418,21 @@ int main(int argc, char **argv)
     a->w = 1920;
     a->h = 1080;
     a->fps = 30;
-    a->rate = 24.0;
+    a->rate = 30.0;
     b->dev = devs[1];
     b->name = "R  NexiGo";
     b->w = 1920;
     b->h = 1080;
     b->fps = 30;
-    b->rate = 24.0;
+    b->rate = 30.0;
     d->dev = devs[2];
     d->name = "D  C310";
     d->w = 1280;
     d->h = 720;
     /* The rates are the user's, 11-03. In MJPEG this camera claims its largest alternate setting at any frame rate, so it must not share a USB 2 bus with the NexiGo, which does the same: STREAMON
      * answers ENOSPC. Measured at 720p15 and 1080p30 on one bus; solved by the two being on different controllers. */
-    d->fps = 25;
-    d->rate = 12.0; /* half of L and R's, the operator's order. Of its own 25, with exposure held to it: 80 ms apart, with one gap of 120 a second */
+    d->fps = 15;
+    d->rate = 15.0; /* its own mode, the operator's order, every frame, with exposure held to it: doubled to 30 by the flow */
     d->steady = 1;
     A.ncam = 3;
     A.mirror = 1;
@@ -1446,7 +1446,7 @@ int main(int argc, char **argv)
     A.flow_level = 1;
     A.framegen = 1;
     A.fsr = 1;
-    A.lr_gen = 1; /* 60, 60 and 29 a second with FSR running, measured 2026-11-03: --lr-gen 0 gives the card back if it is ever short */
+    A.lr_gen = 0; /* L and R are only reference: native 30 a second, the operator's order, 2026-11-03. --lr-gen 1 doubles them again */
     A.fsr_sharp = 0.4f; /* AMD: (1 - 0.8) x 2 stops, its sample's default */
     A.vec = 1;
     A.ref = 1;

@@ -12,6 +12,8 @@ typedef long double real;
 #define LEAK 0.5L      /* of what has added up, kept for the next frame while nothing has */
 #define WINDOW_AGREE 1.0L /* camera pixels from the middle reading: this window agrees */
 #define NEXT_AFTER 2   /* frames between choosing windows */
+#define GIM_HOLD 150   /* frames a window must have held still: ten seconds. A person sitting still for one is not a wall, and measured live, all three windows on one reads as a move */
+#define WHOLE_PICTURE 500 /* per mille of everything that had been still, moved in this frame: a camera moves the whole picture, and something in view does not */
 
 int gimref_init(struct gimref *g, int cols, int rows, int level)
 {
@@ -19,6 +21,7 @@ int gimref_init(struct gimref *g, int cols, int rows, int level)
     g->ar = autoref_create(cols, rows);
     if (!g->ar)
         return -1;
+    autoref_set_hold(g->ar, GIM_HOLD);
     g->cols = cols;
     g->rows = rows;
     g->level = level;
@@ -141,8 +144,9 @@ int gimref_finish(struct gimref *g)
         return g->state = GIM_UNSURE;
     g->pend_u += mid_u;
     g->pend_v += mid_v;
-    /* A move shows in every window at once: something large crossing two of them reads as one too, in about one frame in a thousand. */
-    if (g->agreeing == GIM_WINDOWS && size_of(g->pend_u) + size_of(g->pend_v) > DEAD) {
+    /* A move shows in every window at once, and in the rest of the picture too: something large crossing two reads as one in about one frame in a thousand, and a person with all their windows on them smoothly so, five times in 1,380 live frames. On those frames a sixth of what was still had moved at most; a camera moves all of it. */
+    g->share = autoref_moved_share(g->ar);
+    if (g->agreeing == n && g->share >= WHOLE_PICTURE && size_of(g->pend_u) + size_of(g->pend_v) > DEAD) {
         g->move_u = g->pend_u;
         g->move_v = g->pend_v;
         g->pend_u = g->pend_v = 0.0L;

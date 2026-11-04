@@ -218,7 +218,7 @@ struct vt_vec_meta {
     uint16_t gim_w, gim_h;
     uint64_t cycles_gim;
     float gim_total_u, gim_total_v; /* all it has moved a stopped head by */
-    uint32_t gim_applied, pad2;
+    uint32_t gim_applied, gim_share; /* per mille of what had been still, moved in this frame */
 };
 _Static_assert(sizeof(struct vt_vec_meta) == 128, "two lines");
 

@@ -474,6 +474,7 @@ static uint64_t vec_publish(struct vt_dma *dma, const struct arena *a, const str
     meta->gim_total_u = (float)w->total_u;
     meta->gim_total_v = (float)w->total_v;
     meta->gim_applied = w->applied;
+    meta->gim_share = (uint32_t)w->gim.share;
     meta->gim_state = (uint32_t)w->gim.state;
     meta->gim_windows = (uint32_t)w->gim.nwin;
     meta->gim_read_u = (float)w->gim.read_u;

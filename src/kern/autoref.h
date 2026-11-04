@@ -15,6 +15,10 @@ void autoref_destroy(struct autoref *a);
 void autoref_feed(struct autoref *a, const struct vt_cell *cells, int d_moving);
 /* The best window of wc x wr cells: 1 and its first column and row, or 0 if none has held still with enough corners. */
 int autoref_best(struct autoref *a, int wc, int wr, int *col, int *row);
+/* Frames a cell must go unmoved to count as still: a second unless told. */
+void autoref_set_hold(struct autoref *a, int frames);
+/* Of the textured cells that had been still, how many moved in the last frame fed, per mille. A camera that moves takes all of them with it; something moving in view, some. 0 with too few to say. */
+int autoref_moved_share(const struct autoref *a);
 /* Places not to choose: another region's, the operator's box. They last until cleared. */
 void autoref_clear_blocks(struct autoref *a);
 void autoref_block(struct autoref *a, int col, int row, int wc, int wr);

@@ -7,9 +7,11 @@
 #define HOLD 12       /* frames unmoved before a cell may be part of a reference: a second, at the 12 a second these come */
 #define CAP 240       /* of what a cell has stood through: twenty seconds is as good as it gets, so a place that once stood long does not outrank what stands now for ever */
 #define MARGIN 1      /* cells kept from the picture's edge, where the patches of LK fall off */
+#define MIN_HAD 24     /* still textured cells below which nothing can be said of them all */
 
 struct autoref {
     int cols, rows;
+    int hold, had, moved_now;
     unsigned short *still, *still_d;
     unsigned char *good, *block;
     /* (cols + 1) x (rows + 1) */
@@ -24,6 +26,7 @@ struct autoref *autoref_create(int cols, int rows)
         return NULL;
     a->cols = cols;
     a->rows = rows;
+    a->hold = HOLD;
     a->still = calloc(cells, sizeof *a->still);
     a->still_d = calloc(cells, sizeof *a->still_d);
     a->good = calloc(cells, 1);
@@ -55,8 +58,12 @@ void autoref_destroy(struct autoref *a)
 void autoref_feed(struct autoref *a, const struct vt_cell *cells, int d_moving)
 {
     const size_t n = (size_t)a->cols * (size_t)a->rows;
+    a->had = a->moved_now = 0;
     for (size_t i = 0; i < n; i++) {
         const unsigned state = cells[i].state;
+        const int counted = a->good[i] && a->still[i] >= a->hold;
+        a->had += counted;
+        a->moved_now += counted && (state & VT_CELL_MOVING);
         a->good[i] = (state & VT_CELL_LK) == 0;
         if (state & VT_CELL_MOVING) {
             a->still[i] = 0;
@@ -83,7 +90,7 @@ int autoref_best(struct autoref *a, int wc, int wr, int *col, int *row)
         for (int c = 0; c < cols; c++) {
             const size_t i = (size_t)r * (size_t)cols + (size_t)c;
             line_score += a->good[i] * (1u + a->still_d[i]);
-            line_young += a->still[i] < HOLD || a->block[i];
+            line_young += a->still[i] < a->hold || a->block[i];
             line_good += a->good[i];
             a->sat_score[here + (size_t)c + 1u] = a->sat_score[up + (size_t)c + 1u] + line_score;
             a->sat_young[here + (size_t)c + 1u] = a->sat_young[up + (size_t)c + 1u] + line_young;
@@ -108,6 +115,10 @@ int autoref_best(struct autoref *a, int wc, int wr, int *col, int *row)
         }
     return found;
 }
+
+void autoref_set_hold(struct autoref *a, int frames) { a->hold = frames; }
+
+int autoref_moved_share(const struct autoref *a) { return a->had >= MIN_HAD ? 1000 * a->moved_now / a->had : 0; }
 
 void autoref_clear_blocks(struct autoref *a) { memset(a->block, 0, (size_t)a->cols * (size_t)a->rows); }
 

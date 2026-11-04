@@ -2,7 +2,7 @@
  *
  * L, R and D stand on separate mounts: only D's own picture can say where D points. So D keeps a few windows of its own that have held still, found as L and R's are (autoref.h), never in the
  * operator's box, and each frame asks how far they moved since the last. A median for each window, so a part of one covered does not count, and at least two windows must agree, so one window
- * something crossed does not either. Small steps add up with a leak: slow drift is absorbed, while a move comes through. Only what comes through would move anything.
+ * something crossed does not either, and most of what had been still anywhere in the picture must have moved too: only the camera moves all of it. Small steps add up with a leak: slow drift is absorbed, while a move comes through. Only what comes through moves anything.
  *
  * Frame to frame, not from the camera's still picture: that restarts wherever a cell moved, so its vectors say a move once and then its opposite.
  *
@@ -13,7 +13,7 @@
 #include "vt_proto.h"
 
 #define GIM_WINDOWS VT_GIM_WINDOWS
-#define GIM_SIZE 128   /* a window's side, in the camera's pixels */
+#define GIM_SIZE 64    /* a window's side, in the camera's pixels. At 128 only one fitted, on two frames in three: this picture is dark, and all of a window must have held still */
 #define GIM_CELLS 64   /* cells a window can hold */
 
 enum gim_state { GIM_NONE, GIM_UNSURE, GIM_STILL, GIM_MOVED };
@@ -26,7 +26,7 @@ struct gimref {
     int col[GIM_WINDOWS], row[GIM_WINDOWS], taken[GIM_WINDOWS];
     float du[GIM_WINDOWS][GIM_CELLS], dv[GIM_WINDOWS][GIM_CELLS];
     long double read_u, read_v, pend_u, pend_v, move_u, move_v;
-    int state, agreeing;
+    int state, agreeing, share;
 };
 
 /* 0, or -1 with no memory. */
