@@ -17,7 +17,7 @@ CARD_CFLAGS := --target=x86_64-unknown-linux-musl -march=knc --sysroot=$(KNC_SYS
                -ffp-contract=off -fno-math-errno -fno-jump-tables -falign-loops=1 -fPIE $(COMMON_INC) -MMD -MP
 
 CARD_PROGS := vt_m0 vt_m1 vt_m2 vt_m3 vt_vd vtrackd
-HOST_PROGS := m0_ref m1_ref m2_ref m3_ref vd_ref autoref_check gimref_check vt_xfer vt_quit vt_run vt_replay vt_fsrtrack vt_view vt_calib vt_stitch vt_align vt_gridpng vt_rigcheck vt_stars vt_mapstat vt_mapcheck vt_attitude vt_agree vt_ncc_check
+HOST_PROGS := m0_ref m1_ref m2_ref m3_ref vd_ref autoref_check gimref_check gim_track_check vt_xfer vt_quit vt_run vt_replay vt_fsrtrack vt_view vt_calib vt_stitch vt_align vt_gridpng vt_rigcheck vt_stars vt_mapstat vt_mapcheck vt_attitude vt_agree vt_ncc_check
 
 KERN_ALL := kern/img_ref kern/img_vx kern/lk_ref kern/lk_vx kern/detect kern/framegen kern/fsr3 kern/vecdraw kern/autoref kern/gimref kern/stereo kern/kalman kern/fuse kern/track kern/depth kern/still kern/attitude
 HOST_LIB := host/vt_link host/dataset host/synth host/run_opts host/score
@@ -29,6 +29,7 @@ m1_ref_OBJS := host/m1_ref kern/img_ref kern/img_vx
 vt_m2_OBJS := card/m2_gate kern/lk_ref kern/lk_vx kern/img_ref kern/img_vx card/arena card/topo card/team
 m2_ref_OBJS := host/m2_ref kern/lk_ref kern/lk_vx kern/img_ref kern/img_vx
 vt_vd_OBJS := card/vd_gate kern/vecdraw kern/fsr3 kern/framegen kern/img_ref kern/img_vx kern/vx_gather
+gim_track_check_OBJS := host/gim_track_check $(HOST_LIB) $(KERN_ALL)
 gimref_check_OBJS := host/gimref_check kern/gimref kern/autoref
 autoref_check_OBJS := host/autoref_check kern/autoref
 vd_ref_OBJS := host/vd_ref kern/vecdraw kern/fsr3 kern/framegen kern/img_ref kern/img_vx

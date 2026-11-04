@@ -33,7 +33,7 @@ static const struct vt_field vt_fields[] = {
     VT_F(vt_feat_t, x), VT_F(vt_feat_t, disparity), VT_F(vt_feat_t, z),
     VT_F(vt_cfg_t, dual), VT_F(vt_cfg_t, width2), VT_F(vt_cfg_t, width3), VT_F(vt_msg_t, camera), VT_F(vt_ctl_t, calib_seq), VT_F(vt_ctl_t, calib),
     {"sizeof.depth", 0, (uint32_t)sizeof(struct vt_depth_out)}, {"sizeof.cell", 0, (uint32_t)sizeof(struct vt_cell)},
-    VT_F(vt_cfg_t, framegen), VT_F(vt_cfg_t, gen_pictures), VT_F(vt_res_t, picture), VT_F(vt_cfg_t, vec_overlay), VT_F(vt_cfg_t, fsr_camera), VT_F(vt_cfg_t, fsr_up_w), VT_F(vt_ctl_t, fsr_pub), VT_F(vt_cfg_t, fsr_async), VT_F(vt_res_t, fsr_slot), VT_F(vt_res_t, pt_x), VT_F(vt_msg_t, generated), VT_F(vt_cfg_t, depth_planes), VT_F(vt_cfg_t, depth_avg), VT_F(vt_cfg_t, motion_grey), VT_F(vt_cfg_t, flow_level), VT_F(vt_ctl_t, depth_pub),
+    VT_F(vt_cfg_t, framegen), VT_F(vt_cfg_t, gen_pictures), VT_F(vt_res_t, picture), VT_F(vt_cfg_t, vec_overlay), VT_F(vt_cfg_t, gimbal_ref), VT_F(vt_cfg_t, fsr_camera), VT_F(vt_cfg_t, fsr_up_w), VT_F(vt_ctl_t, fsr_pub), VT_F(vt_cfg_t, fsr_async), VT_F(vt_res_t, fsr_slot), VT_F(vt_res_t, pt_x), VT_F(vt_msg_t, generated), VT_F(vt_cfg_t, depth_planes), VT_F(vt_cfg_t, depth_avg), VT_F(vt_cfg_t, motion_grey), VT_F(vt_cfg_t, flow_level), VT_F(vt_ctl_t, depth_pub),
     VT_F(vt_ctl_t, config), VT_F(vt_ctl_t, frames_pub), VT_F(vt_ctl_t, card_session), VT_F(vt_ctl_t, frames_taken), VT_F(vt_ctl_t, results_pub), VT_F(vt_ctl_t, desc),
 };
 

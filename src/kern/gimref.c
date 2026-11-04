@@ -8,8 +8,8 @@
 typedef long double real;
 
 #define R(x) ((real)(x))
-#define DEAD 0.75L     /* camera pixels that must add up before anything is said to have moved */
-#define LEAK 0.875L    /* of what has added up, kept for the next frame while nothing has */
+#define DEAD 2.0L      /* camera pixels that must add up before anything is said to have moved. On 1,142 live frames of a still rig, the largest other reading was 1.61, and at 0.75 there were 159 false moves */
+#define LEAK 0.5L      /* of what has added up, kept for the next frame while nothing has */
 #define WINDOW_AGREE 1.0L /* camera pixels from the middle reading: this window agrees */
 #define NEXT_AFTER 2   /* frames between choosing windows */
 
@@ -141,7 +141,8 @@ int gimref_finish(struct gimref *g)
         return g->state = GIM_UNSURE;
     g->pend_u += mid_u;
     g->pend_v += mid_v;
-    if (size_of(g->pend_u) + size_of(g->pend_v) > DEAD) {
+    /* A move shows in every window at once: something large crossing two of them reads as one too, in about one frame in a thousand. */
+    if (g->agreeing == GIM_WINDOWS && size_of(g->pend_u) + size_of(g->pend_v) > DEAD) {
         g->move_u = g->pend_u;
         g->move_v = g->pend_v;
         g->pend_u = g->pend_v = 0.0L;

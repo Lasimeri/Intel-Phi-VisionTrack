@@ -81,6 +81,10 @@ if scripts/scene.sh dual 640x480 --dual --gate --framegen >"$s/scene" 2>&1; then
 if scripts/scene.sh dualbox 640x480 --dual --gate --framegen >"$s/scene" 2>&1; then pass "scene dualbox with generated frames: tolerances and replay"; else fail "scene dualbox with generated frames"; /usr/bin/grep -aE 'GATE|replay' "$s/scene" | head -6; fi
 if scripts/scene.sh dual 640x480 --dual --gate >"$s/scene" 2>&1; then pass "scene dual, two independently tracked views: tolerances and replay"; else fail "scene dual"; /usr/bin/grep -aE 'GATE|replay' "$s/scene" | head -6; fi
 if scripts/scene.sh dualbox 640x480 --dual --gate >"$s/scene" 2>&1; then pass "scene dualbox, two boxes drawn by hand over a still thing: tolerances and replay"; else fail "scene dualbox"; /usr/bin/grep -aE 'GATE|replay' "$s/scene" | head -6; fi
+# Camera D's own reference: readings whose answers are known, then a tracker on a picture that jumps, as if the camera were knocked.
+out/host/gimref_check >"$s/gr" 2>&1 && pass "D's reference: every check" || { fail "D's reference"; /usr/bin/grep -a FAIL "$s/gr" | head -4; }
+for n in hold bigbox; do out/host/gim_track_check "$n" 640x480 --frames 150 >"$s/gt" 2>&1 && pass "a jump in $n: the head as it should be" || { fail "a jump in $n"; /usr/bin/grep -a FAIL "$s/gt" | head -4; }; done
+
 # L and R's static regions: chosen from motion and texture, against pictures whose answers are known.
 out/host/autoref_check >"$s/ar" 2>&1 && pass "static references: every check" || { fail "static references"; /usr/bin/grep -a FAIL "$s/ar" | head -4; }
 

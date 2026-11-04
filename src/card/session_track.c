@@ -365,6 +365,8 @@ struct vec_worker {
     int y0, y1, lines, any;
     uint64_t cycles_vectors, cycles_draw, cycles_down, cycles_gim;
     struct gimref gim;
+    long double total_u, total_v;
+    uint32_t applied;
     const struct vt_plane *prev;
     uint32_t want VT_CACHELINE, done VT_CACHELINE;
     int stop VT_CACHELINE, team_ok;
@@ -396,7 +398,7 @@ static void *vec_worker_main(void *arg)
         const uint64_t t1 = vt_tsc();
         int cols, rows;
         const struct vt_cell *cells = ld_cells(w->ld, w->cam, &cols, &rows);
-        /* Where D holds still, and how far that moved since the last frame. So far it moves nothing. */
+        /* Where D holds still, and how far that moved since the last frame. */
         gimref_choose(&w->gim, cells, w->has_box ? w->inside : NULL, w->lines >= 3);
         if (w->prev) {
             const int points = gimref_points(&w->gim);
@@ -469,6 +471,9 @@ static uint64_t vec_publish(struct vt_dma *dma, const struct arena *a, const str
     meta->cycles_draw = w->cycles_draw;
     meta->cycles_down = w->cycles_down;
     meta->cycles_gim = w->cycles_gim;
+    meta->gim_total_u = (float)w->total_u;
+    meta->gim_total_v = (float)w->total_v;
+    meta->gim_applied = w->applied;
     meta->gim_state = (uint32_t)w->gim.state;
     meta->gim_windows = (uint32_t)w->gim.nwin;
     meta->gim_read_u = (float)w->gim.read_u;
@@ -700,6 +705,8 @@ int session_track(struct vt_ctl *ctl, struct vt_dma *dma, const struct topo *top
     uint32_t vec_seen = 0;
     uint64_t vec_seq = 0, vec_dma = 0;
     int vec_rest = 0; /* a frame's lines are out, and the session's part of that frame is still to do */
+    long double rig_u = 0.0L, rig_v = 0.0L;
+    int rig_waiting = 0;
     struct vt_msg vec_msg;
     memset(&vec_msg, 0, sizeof vec_msg);
     struct vt_vec_meta *vec_meta = NULL;
@@ -895,6 +902,12 @@ int session_track(struct vt_ctl *ctl, struct vt_dma *dma, const struct topo *top
                 last_dma = vec_dma;
                 vec_seq++;
                 vec_rest = 1;
+                /* What D's own reference says moved: for its head, at its next frame. */
+                if (cfg->gimbal_ref && vec_w.gim.state == GIM_MOVED) {
+                    rig_u += vec_w.gim.move_u;
+                    rig_v += vec_w.gim.move_v;
+                    rig_waiting = 1;
+                }
             }
             if (flow_job[vec_w.cam].wanted && !vec_rest && __atomic_load_n(&vec_w.want, __ATOMIC_ACQUIRE) == vec_seen) {
                 /* Its picture must have gone before the next is made over it. */
@@ -1023,6 +1036,15 @@ int session_track(struct vt_ctl *ctl, struct vt_dma *dma, const struct topo *top
                 }
             } else if (gen_set >= 0 && fsr_cam == cam)
                 tk_fsr_frame(cur);
+            if (rig_waiting && vec_on && cam == vec_w.cam) {
+                if (tk_rig_moved(cur, rig_u, rig_v)) {
+                    vec_w.total_u += rig_u;
+                    vec_w.total_v += rig_v;
+                    vec_w.applied++;
+                }
+                rig_u = rig_v = 0.0L;
+                rig_waiting = 0;
+            }
             tk_track(cur, set, m, res);
             if (gen_set >= 0 && send_generated(cur, &gm, t_gen - t1, res, gres, gres_phys, dma, &a, fsr_cam == cam && cfg->fsr_async ? NULL : gen_pic[cam], gen_bytes[cam], &gen_turn[cam], fsr_cam == cam && !cfg->fsr_async ? fsr_pics[0] : NULL, cfg, &fsr_turn, &npub, &last_dma, host_res, pub_addr)) {
                 rc = -1;

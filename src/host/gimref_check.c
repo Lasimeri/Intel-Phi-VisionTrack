@@ -68,6 +68,11 @@ int main(void)
     const float su[3] = {3.0f, 3.0f, 3.0f}, sv[3] = {1.5f, 1.5f, 1.5f};
     check(step(&g, cells, box, su, sv) == GIM_MOVED && fabsl(g.move_u - 6.0L) < 0.5L && fabsl(g.move_v - 3.0L) < 0.5L, "a move comes through, in the camera's pixels");
     check(step(&g, cells, box, zero, zero) == GIM_STILL && g.move_u == 0.0L, "once");
+    /* Two agreeing are not enough for a move: something large can cross two. */
+    const float two_u[3] = {4.0f, 4.0f, 0.0f};
+    check(step(&g, cells, box, two_u, zero) != GIM_MOVED && g.move_u == 0.0L, "two windows of three reading a move: not a move");
+    for (int i = 0; i < 10; i++)
+        step(&g, cells, box, zero, zero);
     /* One window has something crossing it. */
     const float one[3] = {9.0f, 0.0f, 0.0f};
     check(step(&g, cells, box, one, zero) == GIM_STILL && g.move_u == 0.0L, "something crossing one window moves nothing");

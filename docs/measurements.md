@@ -822,3 +822,13 @@ Tolerances: 27 of 27 scenes before and after, on the host. Card = host on `passb
 | Capture to result, median, ms | 41.90 | 39.46 | 41.34 |
 
 **Halving was expected to free D, and did not:** the bins move with how much was moving, and the shares do not change enough to tell apart. References: L at 64,432, R at 1376,192, 320 x 320, 34 and 16 of 128 features, +0.0 px/s, 2 chosen in 70 s, of which 36 s had over 800 cells moving. `out/host/autoref_check`: 8 of 8.
+
+## Camera D's own reference (2026-11-03 19:48 to 19:59; `logs/live/gim-20261103-194825.csv` read only, `logs/live/gim-20261103-195812.csv` applied; `out/host/gimref_check`, `out/host/gim_track_check`)
+
+**The first threshold would have failed live, so nothing was applied until the noise was known.** Read only, 1,265 frames: |u| + |v| median 0.318, p95 0.774, p99 1.133 camera pixels. Replayed against those readings, false moves in 1,142 frames: 0.75 px with a leak of 0.875, 159; 1.0 and 0.5, 33; 1.5 and 0.5, 5; 2.0 and 0.5, 1. That one read -5.67, +1.23 with 163 cells moving, so all three windows must now agree as well.
+
+Applied, 1,270 frames, 106 s: **0 moves, the head moved by +0.00, +0.00 px**, 3 windows on 92.8 % of frames. One reading reached 9.002 px and was not believed. Median 0.287, p95 0.672, p99 0.881.
+
+A picture jumping 6, 3 px at frame 70 of `hold`, host: told a frame late, as the spare core is, the window goes +6.00, +3.00 and the head stays stopped; not told, the window goes +5.99, +3.05 only because the jump starts the head. On `bigbox`, whose head was already moving, being told changes nothing, to the bit.
+
+Every result hash of all 27 scenes is that of the build before, on the host, and they hold their tolerances. Card = host on `hold`, `bigbox`, `dart`, `passby`, `dual`, and `bigbox` through FSR.

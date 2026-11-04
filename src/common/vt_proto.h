@@ -123,6 +123,7 @@ struct vt_config {
     uint32_t gen_cameras;    /* bit k: camera k gets generated pictures. 0 = all */
     float fsr_sharp;         /* RCAS, stops: 0 the sharpest */
     uint32_t vec_overlay;    /* 1: with fsr_async, the orange vectors of FSR's camera run on the core nothing else uses, and are drawn at the upscaled size before the second stage */
+    uint32_t gimbal_ref;     /* 1: what camera D's own reference says moved, moves its stopped head (src/kern/gimref.h) */
 };
 
 #define VT_MAX_CAMERAS 3
@@ -216,7 +217,8 @@ struct vt_vec_meta {
     uint16_t gim_win[VT_GIM_WINDOWS][2];
     uint16_t gim_w, gim_h;
     uint64_t cycles_gim;
-    uint32_t pad2[4];
+    float gim_total_u, gim_total_v; /* all it has moved a stopped head by */
+    uint32_t gim_applied, pad2;
 };
 _Static_assert(sizeof(struct vt_vec_meta) == 128, "two lines");
 

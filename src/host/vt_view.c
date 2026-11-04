@@ -81,6 +81,7 @@ struct cam {
     /* L and R's static reference for camera D, found by itself: the operator's order, 2026-11-03. A box the operator draws there stands instead, until it is taken away. */
     struct autoref *ref;
     int ref_on, ref_mine, ref_col, ref_row, ref_wait;
+    uint64_t ref_moved_ns; /* when something last moved in it */
     uint64_t next_ns, skipped; /* when the next one to keep is due; how many have been let go */
     uint8_t *ring;
     uint64_t acq[RING];
@@ -136,6 +137,11 @@ static struct {
     struct vt_vec_meta vec_last;
     uint64_t vec_count;
     int ref; /* L and R look after themselves */
+    int gimbal_ref; /* D's own reference moves its stopped head */
+    const char *gim_who; /* the last time D's reference moved: what else moved with it */
+    uint32_t gim_moves;
+    double gim_from_u, gim_from_v;
+    int gim_from_ok;
     /* L and R's vectors, a frame at a time, each slot's instant. */
     struct cells_plane { uint64_t instance; uint32_t cols, rows, level, valid; } cells_at[VT_CELL_CAMERAS][VT_CELL_SLOTS];
     uint64_t cells_count[VT_CELL_CAMERAS];
@@ -218,6 +224,8 @@ static void ref_step(struct cam *K, const struct vt_cell *cells, const struct vt
     const int cw = VT_CELL_W << cm->level, ch = VT_CELL_H << cm->level, wc = REF_SIZE / cw, wr = REF_SIZE / ch;
     const struct vt_result *r = &K->last;
     const int holding = K->ref_on && (r->state == VT_ST_OBSERVED || r->state == VT_ST_NEW) && (r->flags & VT_F_AT_REST);
+    if (K->ref_on && 4 * autoref_moved(K->ref, K->ref_col, K->ref_row, wc, wr) >= wc * wr)
+        K->ref_moved_ns = vt_now_ns();
     if (holding && 4 * autoref_moved(K->ref, K->ref_col, K->ref_row, wc, wr) < wc * wr)
         return;
     int col, row;
@@ -356,6 +364,7 @@ static void session_config(struct vt_config *c)
             c->fsr_h = 3u * (uint32_t)A.c[2].h / 2u;
             c->fsr_sharp = A.fsr_sharp;
             c->vec_overlay = (uint32_t)A.vec;
+            c->gimbal_ref = (uint32_t)A.gimbal_ref;
             c->fsr_async = 1;
             /* L and R's generated pictures are only for the eye: the tracker never reads them. --lr-gen 0 gives their time to FSR. */
             c->gen_cameras = A.lr_gen ? 0u : 1u << 2;
@@ -683,6 +692,14 @@ static void *link_main(void *arg)
             vec_seen = vp;
             struct vt_vec_meta vm;
             memcpy(&vm, &c->vec_meta, sizeof vm);
+            /* D's reference says it moved. L and R say whether they did: D alone, or more of the rig. */
+            if (vm.gim_state == 3u) {
+                const uint64_t ref_now = vt_now_ns();
+                const int with_l = A.c[0].ref_on && ref_now - A.c[0].ref_moved_ns < 300000000ull, with_r = A.c[1].ref_on && ref_now - A.c[1].ref_moved_ns < 300000000ull;
+                A.gim_who = !A.c[0].ref_on || !A.c[1].ref_on ? "L or R has no reference" : with_l && with_r ? "the whole rig" : with_l ? "D and L" : with_r ? "D and R" : "D alone";
+                A.gim_moves++;
+                fprintf(stderr, "vt_view: D's reference moved %+.2f %+.2f px: %s\n", (double)vm.gim_move_u, (double)vm.gim_move_v, A.gim_who);
+            }
             /* A line for each frame of D: what its own reference read. */
             if (!gim_csv) {
                 char path[80];
@@ -692,10 +709,22 @@ static void *link_main(void *arg)
                 strftime(path, sizeof path, "logs/live/gim-%Y%m%d-%H%M%S.csv", &tm);
                 gim_csv = fopen(path, "w");
                 if (gim_csv)
-                    fprintf(gim_csv, "instance,state,windows,lines,read_u,read_v,move_u,move_v,gim_us\n");
+                    fprintf(gim_csv, "instance,state,windows,lines,read_u,read_v,move_u,move_v,gim_us,total_u,total_v,box_from_ref_u,box_from_ref_v\n");
             }
             if (gim_csv) {
-                fprintf(gim_csv, "%llu,%u,%u,%u,%.4f,%.4f,%.4f,%.4f,%.0f\n", (unsigned long long)vm.instance, vm.gim_state, vm.gim_windows, vm.lines, (double)vm.gim_read_u, (double)vm.gim_read_v, (double)vm.gim_move_u, (double)vm.gim_move_v, (double)vm.cycles_gim * 1e6 / TSC_HZ);
+                /* Where D's box is, from the middle of its windows: its position against what holds still. */
+                double ref_mx = 0.0, ref_my = 0.0;
+                for (uint32_t gi = 0; gi < vm.gim_windows && gi < VT_GIM_WINDOWS; gi++) {
+                    ref_mx += (double)vm.gim_win[gi][0] + 0.5 * (double)vm.gim_w;
+                    ref_my += (double)vm.gim_win[gi][1] + 0.5 * (double)vm.gim_h;
+                }
+                const double ref_n = vm.gim_windows ? (double)vm.gim_windows : 1.0;
+                const struct vt_result *rd = &A.c[A.fsr_cam].last;
+                const int d_box = vm.gim_windows && (rd->state == VT_ST_NEW || rd->state == VT_ST_OBSERVED || rd->state == VT_ST_UNOBSERVED);
+                A.gim_from_u = d_box ? (double)rd->cx - ref_mx / ref_n : 0.0;
+                A.gim_from_v = d_box ? (double)rd->cy - ref_my / ref_n : 0.0;
+                A.gim_from_ok = d_box;
+                fprintf(gim_csv, "%llu,%u,%u,%u,%.4f,%.4f,%.4f,%.4f,%.0f,%.3f,%.3f,%.2f,%.2f\n", (unsigned long long)vm.instance, vm.gim_state, vm.gim_windows, vm.lines, (double)vm.gim_read_u, (double)vm.gim_read_v, (double)vm.gim_move_u, (double)vm.gim_move_v, (double)vm.cycles_gim * 1e6 / TSC_HZ, (double)vm.gim_total_u, (double)vm.gim_total_v, A.gim_from_u, A.gim_from_v);
                 fflush(gim_csv);
             }
             if (vm.slot < VT_VEC_SLOTS) {
@@ -1421,6 +1450,7 @@ int main(int argc, char **argv)
     A.fsr_sharp = 0.4f; /* AMD: (1 - 0.8) x 2 stops, its sample's default */
     A.vec = 1;
     A.ref = 1;
+    A.gimbal_ref = 1;
     A.fsr_cam = 2;
     int at_x = -1, at_y = -1;
     for (int i = 1; i < argc; i++) {
@@ -1434,6 +1464,7 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--size3") && i + 1 < argc) sscanf(argv[++i], "%dx%d", &d->w, &d->h);
         else if (!strcmp(argv[i], "--fps3") && i + 1 < argc) d->fps = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--ref") && i + 1 < argc) A.ref = atoi(argv[++i]) != 0;
+        else if (!strcmp(argv[i], "--gimbal-ref") && i + 1 < argc) A.gimbal_ref = atoi(argv[++i]) != 0;
         else if (!strcmp(argv[i], "--rate") && i + 1 < argc) a->rate = atof(argv[++i]);
         else if (!strcmp(argv[i], "--rate2") && i + 1 < argc) b->rate = atof(argv[++i]);
         else if (!strcmp(argv[i], "--rate3") && i + 1 < argc) d->rate = atof(argv[++i]);
@@ -1897,6 +1928,10 @@ int main(int argc, char **argv)
                 if (A.vec && A.vec_count) {
                     static const char *const gim_names[4] = {"none yet", "unsure", "still", "MOVED"};
                     panel_line(&v, &y, GREY, " D's own reference: %u windows, %s, read %+.2f %+.2f px, %.1f ms on the spare core", A.vec_last.gim_windows, gim_names[A.vec_last.gim_state & 3u], (double)A.vec_last.gim_read_u, (double)A.vec_last.gim_read_v, (double)A.vec_last.cycles_gim * us);
+                    if (A.gim_from_ok)
+                        panel_line(&v, &y, WHITE, " D's box from its reference %+.0f %+.0f px", A.gim_from_u, A.gim_from_v);
+                    if (A.gim_moves)
+                        panel_line(&v, &y, GREY, " it moved %u times, last with %s; the head went %+.1f %+.1f px, %u times", A.gim_moves, A.gim_who ? A.gim_who : "", (double)A.vec_last.gim_total_u, (double)A.vec_last.gim_total_v, A.vec_last.gim_applied);
                 }
                 if (A.vec && A.cells_count[0]) {
                     rate_update(&A.cells_rate[0], A.cells_count[0], t);

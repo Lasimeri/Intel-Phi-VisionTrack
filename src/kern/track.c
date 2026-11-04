@@ -649,6 +649,25 @@ static void fg_build_more(struct tracker *t, int set)
 
 void tk_set_picture(struct tracker *t, uint8_t *pixels) { t->fg_pic = pixels; }
 
+int tk_rig_moved(struct tracker *t, long double du, long double dv)
+{
+    /* A moving head has already taken this through its median. */
+    if (!t->nf || (t->awake && !t->parked))
+        return 0;
+    t->cx = (float)(R(t->cx) + du);
+    t->cy = (float)(R(t->cy) + dv);
+    for (int i = 0; i < t->nf; i++) {
+        t->fmu[i] = (float)(R(t->fmu[i]) - du);
+        t->fmv[i] = (float)(R(t->fmv[i]) - dv);
+        t->frx[i] = (float)(R(t->frx[i]) + du);
+        t->fry[i] = (float)(R(t->fry[i]) + dv);
+        t->fcx[i] = (float)(R(t->fcx[i]) + du);
+        t->fcy[i] = (float)(R(t->fcy[i]) + dv);
+    }
+    t->wake_run = 0;
+    return 1;
+}
+
 int tk_fsr_setup(struct tracker *t, int up_w, int up_h, int w, int h, long double sharpness, tk_alloc_fn alloc, void *ctx, uint8_t *pixels_generated, uint8_t *pixels_real, tk_run_fn run, void *run_ctx)
 {
     t->jf = need(alloc, ctx, sizeof *t->jf);

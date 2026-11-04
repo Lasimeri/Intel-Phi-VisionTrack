@@ -28,6 +28,8 @@ int tk_sets(const struct tracker *t);
 void tk_build(struct tracker *t, int set, const uint8_t *left, const uint8_t *right, const struct vt_msg *m);
 /* The rest of a frame, whose pyramid is complete in `set`. out is complete on return, except the cycle counts of the stages outside it. Thread: the track group's tid 0. */
 void tk_track(struct tracker *t, int set, const struct vt_msg *m, struct vt_result *out);
+/* The camera itself moved by this, measured against places that hold still. Everything in the picture went with it, so a stopped head goes too, and it counts as no motion of anything. Called only on a move: otherwise nothing here runs. 1 if the head took it. */
+int tk_rig_moved(struct tracker *t, long double du, long double dv);
 /* After tk_build of a real frame into `set` and before its tk_track: makes the picture half way between it and the last real one, written to what tk_set_picture named, and fills *gm with its message. Returns the set its
  * plane lives in, or -1 if there is none. A generated picture is for the eye and nothing else reads it: the tracker follows real frames only, so a real row is the same with generation on or off, to the bit. */
 int tk_generate(struct tracker *t, int set, const struct vt_msg *m, struct vt_msg *gm);
