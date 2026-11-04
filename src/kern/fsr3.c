@@ -1140,6 +1140,78 @@ static void stage_acc(struct fsr *f, int tid, int n)
 
 /* ---- FSR_SHARPEN: FsrRcasF with FSR_RCAS_DENOISE, one channel: the luma of grey is twice grey, and only its ratios are read ---- */
 
+/* A generated frame, through FSR without touching its history: the operator wants the flow first and every frame upscaled, and there are 33 ms for each. What has not moved is the history as it stands, denoised, and costs a read. What has moved is the history brought over by half a step, held to what this frame shows there. Its result is scratch: this turn's planes, which the next real frame writes over. */
+static inline void mid_group(struct fsr *f, const struct up_col *c, const struct up_row *r, int x, int y, const struct block *b, vxk mask)
+{
+    const struct vt_plane *ho = &f->color[f->turn ^ 1];
+    float *ch = plane_row(&f->color[f->turn], y) + x;
+    const int first = f->frame == 0 || f->scene_changed;
+    if (!b->moving && !first) {
+        vx_store(ch, vx_blend(mask, vx_load(ch), vx_load(plane_row(ho, y) + x)));
+        return;
+    }
+    const vxf z = vs(&ZERO), one = vs(&ONE);
+    vxf color = z, center = z, moment = z;
+    for (int t = 0; t < 4; t++) {
+        const int sy = r->iy + t - 1;
+        color = vx_fma_s(vx_load(plane_row(&f->hc, sy) + x), &r->wy[t], color);
+        center = vx_fma_s(vx_load(plane_row(&f->hb, sy) + x), &r->ey[t], center);
+        moment = vx_fma_s(vx_load(plane_row(&f->hm, sy) + x), &r->ey[t], moment);
+    }
+    const vxf amin = vx_min(vx_load(plane_row(&f->hl, r->iy) + x), vx_load(plane_row(&f->hl, r->iy + 1) + x));
+    const vxf amax = vx_max(vx_load(plane_row(&f->hh, r->iy) + x), vx_load(plane_row(&f->hh, r->iy + 1) + x));
+    const vxf rcn = vx_mul_s(vx_load(c->rc), &r->rc);
+    center = vx_mul(center, rcn);
+    moment = vx_mul(moment, rcn);
+    color = vx_min(vx_max(color, amin), amax);
+    /* Inside the picture, the history has it; outside, this frame is all there is. */
+    const float dux VX_ALIGNED = (float)(R(b->mx) * f->scale_x), duy VX_ALIGNED = (float)(R(b->my) * f->scale_y), uw_f VX_ALIGNED = (float)f->uw;
+    const long double ry = R(y) + 0.5L + R(duy);
+    const vxf rx = vx_add(vx_load(c->x), vs(&dux));
+    const unsigned exist = !first && ry >= 0.0L && ry < R(f->uh) ? vx_cmp(z, rx, VX_CMP_LE) & vx_cmp(rx, vs(&uw_f), VX_CMP_LT) : 0u;
+    vxf out = color;
+    if (exist) {
+        vxf hist;
+        history_at(f, ho, x, y, b, &hist);
+        /* RectifyHistory, by how fast this block goes; then a frame's worth of what this frame shows, the less history the faster. */
+        static const float LUMA_BOX VX_ALIGNED = 1.7f, P15 VX_ALIGNED = 0.15f;
+        const float vel_box VX_ALIGNED = b->vel_box, dist VX_ALIGNED = b->dist, sqrt_r VX_ALIGNED = b->sqrt_reactive, vel_a VX_ALIGNED = b->vel_acc;
+        const vxf stddev = vx_sqrt(vx_abs(vx_fnma(center, center, moment), &ABS_LANE), &HALF, &THREE_HALVES);
+        const vxf tt = vx_max(vs(&vel_box), vx_max(vs(&dist), vs(&sqrt_r)));
+        const vxf box = vx_mul(vx_mul_s(stddev, &LUMA_BOX), vx_fnma(tt, vf(2.0f), vf(3.0f)));
+        hist = vx_min(vx_max(hist, vx_sub(center, box)), vx_add(center, box));
+        const vxf uw = vf(AVG_LANCZOS_WEIGHT);
+        const vxf hw = vx_add(vx_fma_s(vx_sub(vs(&P15), one), &vel_a, one), uw);
+        const vxf alpha = sat(vx_mul(uw, vx_rcp(hw, &ONE)), z, one);
+        out = vx_blend((vxk)exist, color, vx_max(z, vx_fma(vx_sub(color, hist), alpha, hist)));
+    }
+    vx_store(ch, vx_blend(mask, vx_load(ch), out));
+}
+
+static void stage_mid_acc(struct fsr *f, int tid, int n)
+{
+    const int y0 = row_of(f->uh, tid, n), y1 = row_of(f->uh, tid + 1, n);
+    for (int y = y0; y < y1; y++) {
+        const struct up_row *r = &f->rows[y];
+        const struct block *rowb = &f->blocks[r->by * f->bw];
+        for (int g = 0; g * 16 < f->uw; g++) {
+            const int x = g * 16;
+            const struct up_col *c = &f->cols[g];
+            const struct block *b0 = &rowb[c->block0], *b1 = &rowb[c->block1];
+            if (c->block0 == c->block1 || (b0->mx == b1->mx && b0->my == b1->my && b0->reactive == b1->reactive && b0->moving == b1->moving)) {
+                mid_group(f, c, r, x, y, b0, (vxk)0xffff);
+            } else {
+                unsigned lanes = 0;
+                for (int k = 0; k < 16; k++)
+                    lanes |= (unsigned)((int)floorl((R(x + k) + 0.5L) / f->scale_x) / BLOCK == c->block0) << k;
+                mid_group(f, c, r, x, y, b0, (vxk)lanes);
+                mid_group(f, c, r, x, y, b1, (vxk)(~lanes));
+            }
+        }
+    }
+    img_pad_rows(&f->color[f->turn], y0, y1);
+}
+
 static void stage_sharpen(struct fsr *f, int tid, int n)
 {
     const int y0 = row_of(f->uh, tid, n), y1 = row_of(f->uh, tid + 1, n);
@@ -1193,6 +1265,7 @@ void fsr_stage(struct fsr *f, int stage, int tid, int n)
     case FSR_REACT: stage_react(f, tid, n); break;
     case FSR_INST: stage_inst(f, tid, n); break;
     case FSR_ACC: stage_acc(f, tid, n); break;
+    case FSR_MID_ACC: stage_mid_acc(f, tid, n); break;
     case FSR_SHARPEN: stage_sharpen(f, tid, n); break;
     default: break;
     }
@@ -1235,6 +1308,9 @@ void fsr_stage_end(struct fsr *f, int stage)
             img_pad_tb(&f->hist[f->turn][i]);
         break;
     case FSR_SHARPEN: img_pad_tb(&f->out2[f->turn]); break;
+    case FSR_MID_ACC:
+        img_pad_tb(&f->color[f->turn]);
+        break;
     case FSR_ACC:
         img_pad_tb(&f->color[f->turn]);
         img_pad_tb(&f->lock[f->turn]);

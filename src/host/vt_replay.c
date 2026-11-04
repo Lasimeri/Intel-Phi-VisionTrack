@@ -96,9 +96,9 @@ static void lanczos_up(const uint8_t *in, int w, int h, float *out, float *tmp, 
     }
 }
 
-static void fsr_check_frame(struct fsr_check *q, const struct dataset *ds, int i, const uint8_t *pic, int uw, int uh)
+static void fsr_check_frame(struct fsr_check *q, const struct dataset *ds, int i, double at_frame, const uint8_t *pic, int uw, int uh)
 {
-    const double t = (double)i / ds->s.fps;
+    const double t = at_frame / ds->s.fps;
     scene_render_at(&q->hi, t, i, 0, q->truth);
     lanczos_up(dataset_left(ds, i), ds->s.w, ds->s.h, q->lz, q->tmp, uw, uh);
     struct truth tr;
@@ -145,7 +145,7 @@ int main(int argc, char **argv)
             tk_set_picture(t[c], pics[c]);
         }
     uint8_t *fsr_pic = NULL, *fsr_gen = NULL;
-    static struct fsr_check fq;
+    static struct fsr_check fq, fm;
     if (o.cfg.fsr_camera) {
         const size_t fb = (size_t)o.cfg.fsr_w * o.cfg.fsr_h;
         fsr_pic = host_alloc(NULL, fb);
@@ -188,7 +188,13 @@ int main(int argc, char **argv)
                 r.fsr_w = o.cfg.fsr_w;
                 r.fsr_h = o.cfg.fsr_h;
                 if (i >= 30)
-                    fsr_check_frame(&fq, &ds, i, fsr_pic, (int)o.cfg.fsr_w, (int)o.cfg.fsr_h);
+                {
+                    if (!fm.truth)
+                        fm = fq;
+                    fsr_check_frame(&fq, &ds, i, (double)i, fsr_pic, (int)o.cfg.fsr_w, (int)o.cfg.fsr_h);
+                    /* The frame half way, against the truth half way: Lanczos here is of the real frame it came after, what the eye had before it. */
+                    fsr_check_frame(&fm, &ds, i, (double)i - 0.5, fsr_gen, (int)o.cfg.fsr_w, (int)o.cfg.fsr_h);
+                }
             }
             if (g >= 0) {
                 tk_generated_result(t[c], &gm, &r, &rg);
@@ -239,6 +245,7 @@ int main(int argc, char **argv)
     if (fsr_pic) {
         tk_fsr_report(t[0], ds.s.name, 1.0);
         fprintf(stderr, "fsrcheck %s %dx%d to %ux%u, dB against the clean truth: whole FSR %.2f Lanczos %.2f; on the thing FSR %.2f Lanczos %.2f; elsewhere FSR %.2f Lanczos %.2f\n", ds.s.name, ds.s.w, ds.s.h, o.cfg.fsr_w, o.cfg.fsr_h, psnr(fq.sse_fsr, fq.n), psnr(fq.sse_lz, fq.n), psnr(fq.sse_fsr_thing, fq.n_thing), psnr(fq.sse_lz_thing, fq.n_thing), psnr(fq.sse_fsr_rest, fq.n_rest), psnr(fq.sse_lz_rest, fq.n_rest));
+        fprintf(stderr, "fsrgen %s %dx%d to %ux%u, dB against the clean truth: whole FSR %.2f Lanczos %.2f; on the thing FSR %.2f Lanczos %.2f; elsewhere FSR %.2f Lanczos %.2f\n", ds.s.name, ds.s.w, ds.s.h, o.cfg.fsr_w, o.cfg.fsr_h, psnr(fm.sse_fsr, fm.n), psnr(fm.sse_lz, fm.n), psnr(fm.sse_fsr_thing, fm.n_thing), psnr(fm.sse_lz_thing, fm.n_thing), psnr(fm.sse_fsr_rest, fm.n_rest), psnr(fm.sse_lz_rest, fm.n_rest));
     }
     if (fgcheck)
         fprintf(stderr, "fgcheck %s: over the thing, dB: generated %.2f, older frame again %.2f, the two averaged %.2f; whole picture: generated %.2f, older frame again %.2f, the two averaged %.2f\n", ds.s.name, psnr(fg_thing.gen, fg_thing.n), psnr(fg_thing.repeat, fg_thing.n), psnr(fg_thing.mean, fg_thing.n), psnr(fg_whole.gen, fg_whole.n), psnr(fg_whole.repeat, fg_whole.n), psnr(fg_whole.mean, fg_whole.n));

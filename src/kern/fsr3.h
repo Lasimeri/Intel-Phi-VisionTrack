@@ -11,7 +11,7 @@
  *   depth      none exists at this rate. A moving block stands for near and a still one for far: disocclusion is a still block under where a moving block was, what FSR's reconstructed depth finds with a real depth buffer
  *   reactive   one value a block, from how the motion field diverges
  * Lanes of the output cannot use gather either: 16 output columns span under 16 source columns, so a permute with a table made at the start fetches them. Each source row is filtered across once, and an output row mixes four of them.
- * By the operator's order, 2026-11-03, the flow comes first: its generated frames enter like any other, half a real step from the real frames on each side, so what is invented does enter the history. history_steps says how far back that history lies in the steps of mv_scale, for when frames were let go.
+ * By the operator's order, 2026-11-03, the flow comes first and every frame is upscaled. A generated frame goes through without touching the history (FSR_MID_ACC): nothing invented enters it. history_steps says how far back that history lies in the steps of mv_scale, for when frames were let go.
  *
  * Every stage takes (tid, n): a team may run it in parts, and the answer does not depend on how many threads. The same source is native MVEX on the card and a bit-exact model on the host.
  *
@@ -25,7 +25,7 @@
 #include "framegen.h"
 #include "plane.h"
 
-enum fsr_stage { FSR_REFINE, FSR_INPUT, FSR_HPASS, FSR_DIFF, FSR_MIP0, FSR_MIP1, FSR_MIP2, FSR_SC, FSR_REACT, FSR_INST, FSR_ACC, FSR_SHARPEN, FSR_STAGES };
+enum fsr_stage { FSR_REFINE, FSR_INPUT, FSR_HPASS, FSR_DIFF, FSR_MIP0, FSR_MIP1, FSR_MIP2, FSR_SC, FSR_REACT, FSR_INST, FSR_ACC, FSR_SHARPEN, FSR_STAGES, FSR_MID_ACC };
 
 struct fsr;
 

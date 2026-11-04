@@ -150,6 +150,7 @@ struct tracker {
     int fsr_mid_turn;
     int fsr_which;
     uint64_t fsr_cycles[FSR_STAGES + 1], fsr_runs;
+    uint64_t fsr_mid_cycles, fsr_mid_runs;
     uint8_t *fg_pic; /* where a generated frame's picture goes, for the window; none: it stays for the tracker alone, and is made only for a region */
     uint64_t last_est_ns;
     /* filter */
@@ -719,14 +720,26 @@ void tk_fsr_take(struct tracker *t, int skipped)
 
 void tk_fsr_one(struct tracker *t, int which)
 {
-    /* The flow has come first, at the camera's size: FSR takes its frame as it takes a real one, each half a real frame's step from the last. The operator's order, 2026-11-03. */
+    /* The flow has come first, at the camera's size. Its frame goes through FSR read only, half a real step from the history; the real one does all of FSR, a whole step, from the last real one. The operator's order for every frame upscaled, and 33 ms for each: 2026-11-03. */
     struct job *j = t->jf;
     uint64_t mark = vt_tsc();
     const struct fsr_take *k = &t->fsr_job;
-    if (which)
-        fsr_begin(t->fsr, &k->b, &k->mid, &k->field, 0.5L, 1.0L, k->scene_changed);
-    else
+    t->fsr_which = which;
+    if (!which) {
+        static const int STAGES[4] = {FSR_INPUT, FSR_HPASS, FSR_MID_ACC, FSR_SHARPEN};
         fsr_begin(t->fsr, &k->mid, &k->a, &k->field, 0.5L, 1.0L + 2.0L * (long double)k->skipped, k->scene_changed);
+        fsr_stage_end(t->fsr, FSR_REFINE);
+        for (int s = 0; s < 4; s++) {
+            j->level = STAGES[s];
+            run_fsr_op(t, OP_FSR);
+            fsr_stage_end(t->fsr, STAGES[s]);
+        }
+        run_fsr_op(t, OP_FSR_PICTURE);
+        t->fsr_mid_cycles += vt_tsc() - mark;
+        t->fsr_mid_runs++;
+        return;
+    }
+    fsr_begin(t->fsr, &k->b, &k->a, &k->field, 1.0L, 1.0L + (long double)k->skipped, k->scene_changed);
     for (int s = 0; s < FSR_STAGES; s++) {
         j->level = s;
         run_fsr_op(t, OP_FSR);
@@ -735,7 +748,6 @@ void tk_fsr_one(struct tracker *t, int which)
         t->fsr_cycles[s] += now - mark;
         mark = now;
     }
-    t->fsr_which = which;
     run_fsr_op(t, OP_FSR_PICTURE);
     fsr_end(t->fsr);
     t->fsr_cycles[FSR_STAGES] += vt_tsc() - mark;
@@ -763,7 +775,7 @@ void tk_fsr_report(const struct tracker *t, const char *name, double cycles_per_
         total += us;
         fprintf(stderr, " %s %.0f", stage[i], us);
     }
-    fprintf(stderr, " total %.0f\n", total);
+    fprintf(stderr, " total %.0f; generated frames %llu, us each %.0f\n", total, (unsigned long long)t->fsr_mid_runs, t->fsr_mid_runs ? (double)t->fsr_mid_cycles / (double)t->fsr_mid_runs / cycles_per_us : 0.0);
 }
 
 int tk_generate(struct tracker *t, int set, const struct vt_msg *m, struct vt_msg *gm)

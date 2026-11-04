@@ -844,3 +844,11 @@ Every result hash of all 27 scenes is that of the build before, on the host, and
 Over the last 30 s: 30.00, 30.03, 21.50 shown a second, capture to screen 46.3, 51.3, 192.9 ms. D's exposure 58.8 ms at its own 15, gain 32. Capture to result was 41 ms, and to screen on L and R about 80 ms, with L and R doubled.
 
 **D's reference, corrected twice by what it did live.** With three 128 px windows held for a second it reported 5 moves in 1,380 frames with no camera moved: smooth ramps of 0.4, 2.8, 6.6 px over ten frames, 150 to 260 cells moving, all three windows on a person. The 0 of 1,270 before was luck. Holding ten seconds, and needing half of everything long still to have moved in that frame, gave 0 of 1,621, the share reaching 17.3 % at most over 41 s of heavy motion, but only one window on two frames in three. At 64 px, two windows enough: 0 moves in 3603 frames, two or more windows on 95.0 %, three on 83.0 %. In all, 5,374 frames: one move, 2.76 px, a share of 67.3 % with reading ramping over six frames: very likely a person again.
+
+## Camera D at 30 (the operator's order, 2026-11-03 20:12; `logs/live/rates-20261103-202823.csv`, shown csv)
+
+Every frame through all of FSR left 33 ms for each, and one took 41.5 ms live: 21.50 a second, a third of real frames skipped. A generated frame now goes through without touching FSR's history: input, source rows, then a read of the history where nothing moved, and the history brought over by half a step and held to this frame where something did; RCAS, Lanczos. Nothing invented enters the history. On an idle card, at real size, 6.51 ms against 28.37 ms for a real frame. Card = host at 640x480 and 1280x720.
+
+Live, 98 s with under 300 cells moving: **L 30.00, R 30.00, D 30.03 pictures a second, 0 of 833 real frames skipped**, gaps between D's pictures median 33.6, p95 35.4, p99 37.6, max 41.5 ms. Capture to screen 41.6, 50.0, 136.5 ms, D's down from 192.9. Capture to result 32.11 ms. D's reference: 0 moves in 1,494 frames. **Heavy motion was not in this run.**
+
+Against the clean truth, host: real frames as before the flow moved first, `hold` 48.84 dB, `bigbox` 42.49 dB. Generated, against the truth half way, now reported by `vt_replay` as `fsrgen`: `hold` 48.76 dB, `bigbox` 41.49 dB, `dart` 37.78 dB, the thing itself on `dart` 23.14 dB against 19.19 for the last real frame upscaled.

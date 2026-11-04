@@ -4,7 +4,7 @@ Current as of 2026-11-03 17:40. Numbers and their sources: [measurements.md](mea
 
 ## Failing, or not built
 
-- **Camera D misses 30 pictures a second.** 21.50 a second over 30 s, 33 % of real frames skipped (19.3 with over 800 cells moving, 22.4 under 300). Every frame through FSR at 15 real frames a second leaves 33 ms for each, and one takes 28.9 ms alone on the card and about 44 ms live, where it shares its cores with the tracker and the maps.
+- **Camera D's 30 a second is not yet measured under heavy motion.** 30.03 shown a second, 0 of 833 real frames skipped, with under 300 cells moving. A generated frame works only on moving blocks, so it costs more when more moves. On an idle card a real frame takes 28.4 ms and a generated one 6.5, against 66.7 for the pair.
 - **By default there is no 3D of the thing.** It needs a box drawn on it in both L and R. Those now hold static references until told otherwise, and say so in the panel.
 - **L and R's references only label.** They say whether D moved alone or with them, in the log and the panel. Separate mounts mean they can say nothing about where D points.
 - **D's reference has never seen a real move.** A jumping picture on the host, yes. On the live rig, 1,270 frames with none, which is right for a still rig and proves nothing about a knocked one. It follows translation only: a turn about D's own axis it reads as disagreement. A move too big for LK reads as nothing.
