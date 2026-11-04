@@ -1652,8 +1652,12 @@ int main(int argc, char **argv)
                 x11view_tint(&v, show_cover, (int)show_lines.w, (int)show_lines.y0, (int)show_lines.y1, ox, oy, A.mirror, 0xff8040u);
             /* L and R's own, of this very picture, need no map. */
             const int own = A.vec && k < VT_CELL_CAMERAS && A.cells_count[k];
+            /* With a region selected, only what lies in its box: the operator's order, 2026-11-03. With every vector on, or none selected, the whole picture. */
+            const struct vt_result *rk = &r[k];
+            const int has_box = !vectors_all && (rk->state == VT_ST_NEW || rk->state == VT_ST_OBSERVED || rk->state == VT_ST_UNOBSERVED);
+            const double inside[4] = {(double)rk->cx - 0.5 * (double)rk->w, (double)rk->cy - 0.5 * (double)rk->h, (double)rk->cx + 0.5 * (double)rk->w, (double)rk->cy + 0.5 * (double)rk->h};
             if (tracking && !dragging && own && show_cells[k])
-                dv_cells(&v, show_cells[k], show_cell_at[k].cols, show_cell_at[k].rows, (int)show_cell_at[k].level, ox, oy, K->vw, K->vs, A.mirror, vectors_all);
+                dv_cells(&v, show_cells[k], show_cell_at[k].cols, show_cell_at[k].rows, (int)show_cell_at[k].level, ox, oy, K->vw, K->vs, A.mirror, vectors_all, has_box ? inside : NULL);
             if (tracking && map && !dragging && !baked && !own)
                 dv_vectors(&v, map, k, ox, oy, K->vw, K->vs, A.mirror, vectors_all);
             draw_view(&v, ox, oy, K, &r[k], tracking);

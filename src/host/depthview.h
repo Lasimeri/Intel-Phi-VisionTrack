@@ -16,8 +16,8 @@ void dv_legend(struct x11view *v, const void *map, int x, int y, int w);
 void dv_cloud(struct x11view *v, const void *map, const struct vt_calib *cal, int box_x, int box_y, int box_size, int cx, int cy, double side, double px_per_m);
 /* The vectors of one camera over its picture. all = 0: cells that moved, at true length times gain. all = 1: every good vector, at a far higher gain, which shows the noise. */
 void dv_vectors(struct x11view *v, const void *map, int cam, int pane_x, int pane_y, int pane_w, double view, int mirror, int all);
-/* The same from a frame's own vectors, wherever they came from. */
-void dv_cells(struct x11view *v, const struct vt_cell *cells, uint32_t cols, uint32_t rows, int flow_level, int pane_x, int pane_y, int pane_w, double view, int mirror, int all);
+/* The same from a frame's own vectors, wherever they came from. inside, if not NULL: x0, y0, x1, y1 in the camera's pixels, and only cells whose centre lies there. */
+void dv_cells(struct x11view *v, const struct vt_cell *cells, uint32_t cols, uint32_t rows, int flow_level, int pane_x, int pane_y, int pane_w, double view, int mirror, int all, const double *inside);
 
 /* Writes PREFIX.bin (the buffer), PREFIX.ply (points in the world frame, with confidence), PREFIX.pgm (depth). 0, or -1. */
 int dv_save(const void *map, const struct vt_calib *cal, const char *prefix);

@@ -114,7 +114,7 @@ void dv_cloud(struct x11view *v, const void *map, const struct vt_calib *cal, in
     }
 }
 
-void dv_cells(struct x11view *v, const struct vt_cell *cells, uint32_t cols, uint32_t rows, int flow_level, int pane_x, int pane_y, int pane_w, double view, int mirror, int all)
+void dv_cells(struct x11view *v, const struct vt_cell *cells, uint32_t cols, uint32_t rows, int flow_level, int pane_x, int pane_y, int pane_w, double view, int mirror, int all, const double *inside)
 {
     const int scale = 1 << flow_level;
     /* Pixels of the level drawn in pixels of the camera, and then made visible: a vector of a quarter of a level's pixel is one pixel of the camera. */
@@ -123,6 +123,9 @@ void dv_cells(struct x11view *v, const struct vt_cell *cells, uint32_t cols, uin
         for (uint32_t c = 0; c < cols; c++) {
             const struct vt_cell *e = &cells[r * cols + c];
             const int good = (e->state & VT_CELL_LK) == 0, changed = (e->state & VT_CELL_CHANGED) != 0;
+            const int cam_x = (int)(c * VT_CELL_W + VT_CELL_W / 2) * scale, cam_y = (int)(r * VT_CELL_H + VT_CELL_H / 2) * scale;
+            if (inside && (cam_x < inside[0] || cam_x > inside[2] || cam_y < inside[1] || cam_y > inside[3]))
+                continue;
             if (!(all ? good : changed))
                 continue;
             int x0 = (int)((double)((int)(c * VT_CELL_W + VT_CELL_W / 2) * scale) * view);
@@ -144,7 +147,7 @@ void dv_vectors(struct x11view *v, const void *map, int cam, int pane_x, int pan
     const struct vt_depth_out *h = map;
     const struct vt_motion *m = &h->cam[cam];
     if (m->cols && m->cell_at)
-        dv_cells(v, vt_depth_cells(map, cam), m->cols, m->rows, (int)h->flow_level, pane_x, pane_y, pane_w, view, mirror, all);
+        dv_cells(v, vt_depth_cells(map, cam), m->cols, m->rows, (int)h->flow_level, pane_x, pane_y, pane_w, view, mirror, all, NULL);
 }
 
 int dv_save(const void *map, const struct vt_calib *cal, const char *prefix)

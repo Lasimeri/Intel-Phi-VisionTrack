@@ -89,7 +89,11 @@ int main(void)
     memcpy(&cells[18 * COLS + 3].u, &nan_bits, 4);
     cells[18 * COLS + 3].state = VT_CELL_CHANGED;
     const long double view = (long double)UW / (long double)RW;
-    const int n = vd_draw(d, cells, COLS, ROWS, LEVEL, view);
+    /* Only inside a box: the long line's cell, centred at (240, 184) in the camera's pixels, is in this one, the others are not. */
+    const float box[4] = {200.0f, 150.0f, 300.0f, 220.0f}, away[4] = {0.0f, 0.0f, 40.0f, 40.0f};
+    check(vd_draw(d, cells, COLS, ROWS, LEVEL, view, box) == 1 && plane_row(p, 368)[480] == 1.0f && plane_row(p, 144)[992] == 0.0f, "inside a box, only the cell inside it");
+    check(vd_draw(d, cells, COLS, ROWS, LEVEL, view, away) == 0 && all_zero(p), "a box with no cell in it: nothing");
+    const int n = vd_draw(d, cells, COLS, ROWS, LEVEL, view, NULL);
     check(n == 3, "three cells changed, three lines");
     /* The gain is 4: 3.5 x 2 x 2 x 4 = 56 right, 1.25 x 16 = 20 up. */
     check(plane_row(p, 368)[480] == 1.0f, "the line starts at the cell's centre");
@@ -122,7 +126,7 @@ int main(void)
         fsr_down_plane(f, p, vd_rows(d), y0, y1, pic, (float *)(void *)((char *)temp + (size_t)tid * fsr_down_temp_bytes(f)), tid, THREADS);
     const uint64_t down = cycles_now() - t0;
     t0 = cycles_now();
-    const int gone = vd_draw(d, cells, 0, 0, LEVEL, view);
+    const int gone = vd_draw(d, cells, 0, 0, LEVEL, view, NULL);
     const uint64_t erase = cycles_now() - t0;
     check(gone == 0 && all_zero(p), "the next frame's erase leaves the plane all zero");
     t0 = cycles_now();

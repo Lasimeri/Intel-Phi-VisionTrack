@@ -780,3 +780,22 @@ Each doubled: 48, 48 and 25 a second. Device modes from `v4l2-ctl --list-formats
 Over the last 30 s: 48.03, 48.00 and 23.17 shown a second, capture to screen 80.4, 80.7 and 200.3 ms, D's at its limit of 2.5 frames. D's real frames: 908 shown, 26 skipped. **D at 23.17 of 25 is short of the order.**
 
 **D at 12, the operator's correction (18:41 to 18:43, `logs/live/rates-20261103-184141.csv`, 90 s).** Doubled to 24. By cells moving: under 300, shown 47.3, 47.3, 23.4; 300 to 800, 47.9, 47.9, 22.4; over 800, 47.9, 47.9, 21.2. Orange 23.1 to 24.0 on L and R, 11.8 to 12.0 on D; maps 11.8 to 12.0; capture to result 43 ms. Over the last 30 s: 48.03, 47.97, 23.90 shown a second, capture to screen 81.5, 79.9, 202.7 ms. D's real frames: 880 shown, 24 skipped.
+
+## Only what lies in the selected box (the operator's order, 2026-11-03; host: `out/host/vt_replay SCENE 640x480 --gate --csv`, one run each, against the build before; card: `scripts/scene.sh`, `scripts/card_run.sh -p 256 vt_vd`)
+
+| Scene | Centre median, before | After | p95, before | After |
+| --- | --- | --- | --- | --- |
+| bigbox | 0.079 | 0.012 | 0.135 | 0.028 |
+| dart | 0.086 | 0.069 | 1.821 | 0.151 |
+| jointed | 9.413 | 5.726 | 16.202 | 9.414 |
+| swing | 0.008 | 0.003 | 0.011 | 0.006 |
+| translate | 0.006 | 0.005 | 0.011 | 0.009 |
+| noise | 0.037 | 0.037 | 0.074 | 0.074 |
+| smallbox | 1.001 | 1.021 | 1.170 | 1.207 |
+| offjointed | 6.981 | 7.433 | 159.984 | 159.984 |
+| offbox | 1.858 | 2.595 | 150.013 | 150.013 |
+| rotate | 2.585 | 3.477 | 3.684 | 4.570 |
+
+Tolerances: 27 of 27 scenes before and after, on the host. Card = host on `passby`, `dart`, `bigbox`, `jointed`, `rotate`; `vt_vd`, with its checks of the box, identical.
+
+**The first version failed `passby`.** It dropped every feature outside the box, moving head or stopped. What a passer has dragged out is how a stopped head knows it for an outsider, and without those the head started on it at frame 105, 180 to 300 px off. Dropping only those gone still failed too. So a stopped head never drops them: it follows them, and they can start nothing.

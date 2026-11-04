@@ -20,8 +20,8 @@ struct vecdraw;
 size_t vd_bytes(int w, int h, int cells);
 struct vecdraw *vd_init(void *mem, int w, int h, int cells);
 
-/* The cells that moved, of a camera's picture at pyramid level `level`; `view` = this plane's width over the camera's. The number of lines drawn. */
-int vd_draw(struct vecdraw *d, const struct vt_cell *cells, int cols, int rows, int level, long double view);
+/* The cells that moved, of a camera's picture at pyramid level `level`; `view` = this plane's width over the camera's. inside, if not NULL: x0, y0, x1, y1 in the camera's pixels, and only cells whose centre lies there. The number of lines drawn. */
+int vd_draw(struct vecdraw *d, const struct vt_cell *cells, int cols, int rows, int level, long double view, const float *inside);
 
 const struct vt_plane *vd_plane(const struct vecdraw *d);
 /* One byte a row of the plane: non-zero where a line may have touched it. */

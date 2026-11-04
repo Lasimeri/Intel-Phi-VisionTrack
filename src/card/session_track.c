@@ -353,6 +353,8 @@ struct vec_worker {
     int cpus[8], core_of[8], n;
     struct team *team;
     const struct vt_plane *cur;
+    float inside[4];
+    int has_box;
     uint64_t instance;
     int y0, y1, lines, any;
     uint64_t cycles_vectors, cycles_draw, cycles_down;
@@ -386,7 +388,7 @@ static void *vec_worker_main(void *arg)
         const uint64_t t1 = vt_tsc();
         int cols, rows;
         const struct vt_cell *cells = ld_cells(w->ld, w->cam, &cols, &rows);
-        w->lines = vd_draw(w->draw, cells, cols, rows, w->level, w->view);
+        w->lines = vd_draw(w->draw, cells, cols, rows, w->level, w->view, w->has_box ? w->inside : NULL);
         w->any = fsr_down_span(w->fsr, vd_rows(w->draw), &w->y0, &w->y1);
         const uint64_t t2 = vt_tsc();
         if (w->any) {
@@ -741,6 +743,8 @@ int session_track(struct vt_ctl *ctl, struct vt_dma *dma, const struct topo *top
         struct tracker *t;
         int set, wanted;
         struct vt_msg msg;
+        float inside[4];  /* the selected box at this frame, in the camera's pixels */
+        int has_box;
     } flow_job[VT_MAX_CAMERAS];
     memset(flow_job, 0, sizeof flow_job);
     struct vt_msg map_msg;
@@ -840,6 +844,8 @@ int session_track(struct vt_ctl *ctl, struct vt_dma *dma, const struct topo *top
                 vec_msg = flow_job[vec_w.cam].msg;
                 vec_w.instance = vec_msg.instance;
                 vec_w.cur = tk_level(flow_job[vec_w.cam].t, flow_job[vec_w.cam].set, ld_flow_level(ld));
+                vec_w.has_box = flow_job[vec_w.cam].has_box;
+                memcpy(vec_w.inside, flow_job[vec_w.cam].inside, sizeof vec_w.inside);
                 __atomic_store_n(&vec_w.want, vec_w.want + 1u, __ATOMIC_RELEASE);
             }
         }
@@ -978,6 +984,11 @@ int session_track(struct vt_ctl *ctl, struct vt_dma *dma, const struct topo *top
                 flow_job[cam].t = cur;
                 flow_job[cam].set = set;
                 flow_job[cam].msg = *m;
+                flow_job[cam].has_box = res->state == VT_ST_NEW || res->state == VT_ST_OBSERVED || res->state == VT_ST_UNOBSERVED;
+                flow_job[cam].inside[0] = (float)((long double)res->cx - 0.5L * (long double)res->w);
+                flow_job[cam].inside[1] = (float)((long double)res->cy - 0.5L * (long double)res->h);
+                flow_job[cam].inside[2] = (float)((long double)res->cx + 0.5L * (long double)res->w);
+                flow_job[cam].inside[3] = (float)((long double)res->cy + 0.5L * (long double)res->h);
                 flow_job[cam].wanted = 1;
                 res->cycles[VT_T_DEPTH] = depth_cycles; /* since the last result */
                 depth_cycles = 0;

@@ -31,7 +31,6 @@
 #define BOX_ROOM 1.25L           /* a closed box: the members' middle eight in ten, times this, is the thing */
 #define BOX_MARGIN 8.0L          /* and this many pixels in all */
 #define BOX_RATE 0.5L            /* of the way to what they reach, per frame */
-#define GROW_REACH 1.6L          /* a closed box looks this far beyond itself for more of the thing */
 #define GROW_MOTION 0.1L         /* pixels a frame, |u| + |v|: a head moving slower than this proves nothing about a new feature */
 #define HOLD_STILL 0.1L          /* the same: a head slower than this is standing still */
 #define HOLD_AFTER 15            /* real frames of that before it parks */
@@ -686,6 +685,8 @@ void tk_fsr_frame(struct tracker *t)
     uint64_t mark = vt_tsc();
     const struct fg_job *g = &t->fg;
     fsr_begin(t->fsr, &g->b0, &g->a0, &g->fil[0], 1.0L, g->scene_changed);
+    /* Now, not when they are used: the camera's next frame writes this field, and FSR may still be working when it comes. */
+    fsr_mid_begin(t->fsr, &g->mid);
     for (int s = 0; s < FSR_STAGES; s++) {
         j->level = s;
         run_fsr_op(t, OP_FSR);
@@ -694,7 +695,6 @@ void tk_fsr_frame(struct tracker *t)
         t->fsr_cycles[s] += now - mark;
         mark = now;
     }
-    fsr_mid_begin(t->fsr, &g->mid);
     run_fsr_op(t, OP_FSR_MID);
     fsr_mid_end(t->fsr);
     t->fsr_which = 1;
@@ -910,11 +910,10 @@ static void seed_at(struct tracker *t, real rx0, real ry0, real bw, real bh, int
     }
 }
 
-/* Corners within a part of the region. A closed box looks a little beyond itself, as far as the operator's box: more of the thing that was only partly found joins from there. */
+/* Corners within a part of the box, and nowhere else: what lies outside it interferes with what was selected. The operator's order, 2026-11-03. */
 static void seed_part(struct tracker *t, real part, int age)
 {
-    const real ww = t->closed && GROW_REACH * R(t->rw) < R(t->gw) ? GROW_REACH * R(t->rw) : R(t->gw), wh = t->closed && GROW_REACH * R(t->rh) < R(t->gh) ? GROW_REACH * R(t->rh) : R(t->gh);
-    const real bw = part * ww, bh = part * wh;
+    const real bw = part * R(t->rw), bh = part * R(t->rh);
     seed_at(t, R(t->cx) - 0.5L * bw, R(t->cy) - 0.5L * bh, bw, bh, age);
 }
 
@@ -955,7 +954,12 @@ static void look_there(struct tracker *t)
     else
         w = t->nf;
     t->nf = w;
-    seed_at(t, R(t->look_x0) - LOOK_GROW, R(t->look_y0) - LOOK_GROW, R(t->look_x1) - R(t->look_x0) + 2.0L * LOOK_GROW, R(t->look_y1) - R(t->look_y0) + 2.0L * LOOK_GROW, PROBATION - 1);
+    /* Around that place, as far as the box. */
+    const real left = R(t->cx) - 0.5L * R(t->rw), top = R(t->cy) - 0.5L * R(t->rh);
+    const real x0 = R(t->look_x0) - LOOK_GROW > left ? R(t->look_x0) - LOOK_GROW : left, y0 = R(t->look_y0) - LOOK_GROW > top ? R(t->look_y0) - LOOK_GROW : top;
+    const real x1 = R(t->look_x1) + LOOK_GROW < left + R(t->rw) ? R(t->look_x1) + LOOK_GROW : left + R(t->rw), y1 = R(t->look_y1) + LOOK_GROW < top + R(t->rh) ? R(t->look_y1) + LOOK_GROW : top + R(t->rh);
+    if (x1 > x0 && y1 > y0)
+        seed_at(t, x0, y0, x1 - x0, y1 - y0, PROBATION - 1);
 }
 
 /* Out of patience: no position is claimed any more, but what it looks like is kept, and it can come back. */
@@ -1121,6 +1125,41 @@ static void follow_members(struct tracker *t)
     const real tw = nw < R(t->gw) ? nw : R(t->gw), th = nh < R(t->gh) ? nh : R(t->gh);
     t->rw = (float)(R(t->rw) + BOX_RATE * (tw - R(t->rw)));
     t->rh = (float)(R(t->rh) + BOX_RATE * (th - R(t->rh)));
+}
+
+/* Only what lies in the box counts: the operator's order, 2026-11-03, what lies outside it interfering with what was selected. A moving head drops the rest at once. A stopped one has two allowances. Something it has not started for yet may be on its way out: a feature its own last few steps would take there still counts, until the head has had the frames it needs to start. And what lies further out still shows where whatever dragged it went, which is what stops that being taken for the thing: dropped there, a passer started the head on frame 105 of `passby`. So it goes on, and can start nothing. */
+static void keep_inside(struct tracker *t)
+{
+    const real left = R(t->cx) - 0.5L * R(t->rw), right = R(t->cx) + 0.5L * R(t->rw), top = R(t->cy) - 0.5L * R(t->rh), bottom = R(t->cy) + 0.5L * R(t->rh);
+    const int moving = t->awake && !t->parked;
+    int w = 0;
+    for (int i = 0; i < t->nf; i++) {
+        const real x = R(t->fx[i]), y = R(t->fy[i]);
+        const real ox = x < left ? left - x : x > right ? x - right : 0.0L, oy = y < top ? top - y : y > bottom ? y - bottom : 0.0L;
+        const real reach = moving ? 0.0L : (real)WAKE_FRAMES * (fabsl(R(t->fu[i])) + fabsl(R(t->fv[i])));
+        if (ox + oy > reach) {
+            if (moving)
+                continue;
+            t->fborn[i] = 1;
+        }
+        t->fx[w] = t->fx[i];
+        t->fy[w] = t->fy[i];
+        t->fu[w] = t->fu[i];
+        t->fv[w] = t->fv[i];
+        t->fsigma[w] = t->fsigma[i];
+        t->fdisp[w] = t->fdisp[i];
+        t->fflag[w] = t->fflag[i];
+        t->fmu[w] = t->fmu[i];
+        t->fmv[w] = t->fmv[i];
+        t->frx[w] = t->frx[i];
+        t->fry[w] = t->fry[i];
+        t->fcx[w] = t->fcx[i];
+        t->fcy[w] = t->fcy[i];
+        t->fage[w] = t->fage[i];
+        t->fborn[w] = t->fborn[i];
+        w++;
+    }
+    t->nf = w;
 }
 
 /* Not observed: no motion is reported for this frame. The features are not trusted any more; the position shown is a prediction. */
@@ -1426,6 +1465,7 @@ static void region_from_flow(struct tracker *t, const struct vt_msg *d, real dt,
         close_box(t);
     else if (t->closed)
         follow_members(t);
+    keep_inside(t);
     /* Nothing moving for a while: the head parks, and from here each feature's progress is measured from where it stands. */
     if (following) {
         t->still_run = fabsl(cu) + fabsl(cv) < HOLD_STILL ? t->still_run + 1 : 0;

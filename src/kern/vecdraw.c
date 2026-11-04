@@ -81,7 +81,7 @@ static void stroke(const struct vt_plane *p, const struct line *l, float value)
 
 static inline int to_int(real v) { return (int)v; }
 
-int vd_draw(struct vecdraw *d, const struct vt_cell *cells, int cols, int rows, int level, long double view)
+int vd_draw(struct vecdraw *d, const struct vt_cell *cells, int cols, int rows, int level, long double view, const float *inside)
 {
     const struct vt_plane *p = &d->cov;
     for (int i = 0; i < d->nlines; i++)
@@ -95,6 +95,10 @@ int vd_draw(struct vecdraw *d, const struct vt_cell *cells, int cols, int rows, 
         for (int c = 0; c < cols && n < d->cap; c++) {
             const struct vt_cell *e = &cells[r * cols + c];
             if (!(e->state & VT_CELL_CHANGED))
+                continue;
+            /* Where the cell is in the camera's own pixels: outside the selected box it is drawn no more than it is tracked. */
+            const int cam_x = (c * VT_CELL_W + VT_CELL_W / 2) << level, cam_y = (r * VT_CELL_H + VT_CELL_H / 2) << level;
+            if (inside && ((real)cam_x < (real)inside[0] || (real)cam_x > (real)inside[2] || (real)cam_y < (real)inside[1] || (real)cam_y > (real)inside[3]))
                 continue;
             const int good = (e->state & VT_CELL_LK) == 0;
             real du = good ? (real)e->u * gain : (real)0, dv = good ? (real)e->v * gain : (real)0;
