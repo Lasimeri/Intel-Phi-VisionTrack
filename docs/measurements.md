@@ -744,7 +744,7 @@ On the spare core, two threads, one panel reading each: vectors 13.2, lines 0.40
 
 **L and R's vectors under motion (18:09 to 18:26).** The operator saw them lag out completely with much moving, D's fine. They reached the window only inside the map, which runs in the frame loop's gaps; motion takes the gaps, and a guard of the first build took the map's turn while D's vectors ran. They now run on FSR's team and go out alone, a frame at a time, and the window draws those of the picture on screen. A first try ran them between FSR's stages, about 5 ms, 60 a second, on top of FSR's 705 ms a second: FSR let 780 of 2,478 frames go, D 19 to 23 pictures a second. Between FSR's frames instead (`logs/live/rates-20261103-182328.csv`, shown csv, 150 s, by cells moving over all three):
 
-| Cells moving | Seconds | Shown L, R, D | Orange L, R, D | Maps | Capture to result, ms |
+| Cells moving, all three | Seconds | Shown L, R, D | Orange L, R, D | Maps | Capture to result, ms |
 | --- | --- | --- | --- | --- | --- |
 | under 300 | 49 | 60.0, 60.0, 28.0 | 29.4, 28.9, 14.9 | 14.8 | 46.28 |
 | 300 to 800 | 47 | 59.9, 60.0, 25.1 | 28.4, 27.2, 14.8 | 14.8 | 48.49 |
@@ -771,7 +771,7 @@ Steadier from frame to frame on three of six; further from the truth on four of 
 
 Each doubled: 48, 48 and 25 a second. Device modes from `v4l2-ctl --list-formats-ext`: L at 1080p 60, 50, 30, 20, 10; R 60, 30; D at 720p 30, 25, 20, 15, 10, 5.
 
-| Cells moving | Seconds | Shown L, R, D | Orange L, R, D | Maps | Capture to result, ms |
+| Cells moving, all three | Seconds | Shown L, R, D | Orange L, R, D | Maps | Capture to result, ms |
 | --- | --- | --- | --- | --- | --- |
 | under 300 | 22 | 47.7, 47.8, 23.8 | 24.2, 24.2, 12.5 | 12.5 | 42.79 |
 | 300 to 800 | 20 | 46.9, 46.9, 22.5 | 23.4, 23.5, 12.5 | 12.5 | 42.98 |
@@ -779,7 +779,7 @@ Each doubled: 48, 48 and 25 a second. Device modes from `v4l2-ctl --list-formats
 
 Over the last 30 s: 48.03, 48.00 and 23.17 shown a second, capture to screen 80.4, 80.7 and 200.3 ms, D's at its limit of 2.5 frames. D's real frames: 908 shown, 26 skipped. **D at 23.17 of 25 is short of the order.**
 
-**D at 12, the operator's correction (18:41 to 18:43, `logs/live/rates-20261103-184141.csv`, 90 s).** Doubled to 24. By cells moving: under 300, shown 47.3, 47.3, 23.4; 300 to 800, 47.9, 47.9, 22.4; over 800, 47.9, 47.9, 21.2. Orange 23.1 to 24.0 on L and R, 11.8 to 12.0 on D; maps 11.8 to 12.0; capture to result 43 ms. Over the last 30 s: 48.03, 47.97, 23.90 shown a second, capture to screen 81.5, 79.9, 202.7 ms. D's real frames: 880 shown, 24 skipped.
+**D at 12, the operator's correction (18:41 to 18:43, `logs/live/rates-20261103-184141.csv`, 90 s).** Doubled to 24. By cells moving over all three: under 300, shown 47.3, 47.3, 23.4; 300 to 800, 47.9, 47.9, 22.4; over 800, 47.9, 47.9, 21.2. Orange 23.1 to 24.0 on L and R, 11.8 to 12.0 on D; maps 11.8 to 12.0; capture to result 43 ms. Over the last 30 s: 48.03, 47.97, 23.90 shown a second, capture to screen 81.5, 79.9, 202.7 ms. D's real frames: 880 shown, 24 skipped.
 
 ## Only what lies in the selected box (the operator's order, 2026-11-03; host: `out/host/vt_replay SCENE 640x480 --gate --csv`, one run each, against the build before; card: `scripts/scene.sh`, `scripts/card_run.sh -p 256 vt_vd`)
 
@@ -804,7 +804,7 @@ Tolerances: 27 of 27 scenes before and after, on the host. Card = host on `passb
 
 720p12, by the flow 720p24, each frame to 1440p by FSR, Lanczos to 1080p. Card = host at 640x480 and 1280x720. On a host check against the clean truth, `hold` 48.84 to 48.10 dB, `bigbox` 42.49 to 43.39 dB, a bug detector and no verdict on looks. Alone on the card an FSR frame takes 28.86 ms.
 
-| Cells moving | Seconds | Shown L, R, D | Orange L, R, D | Maps | Capture to result, ms |
+| Cells moving, all three | Seconds | Shown L, R, D | Orange L, R, D | Maps | Capture to result, ms |
 | --- | --- | --- | --- | --- | --- |
 | under 300 | 46 | 48.0, 48.0, 19.5 | 20.7, 20.5, 12.0 | 12.0 | 41.90 |
 | 300 to 800 | 10 | 47.8, 47.9, 19.0 | 19.3, 19.6, 11.9 | 12.1 | 42.08 |
@@ -821,7 +821,7 @@ Tolerances: 27 of 27 scenes before and after, on the host. Card = host on `passb
 | FSR's real frames skipped | 21.1 % | 20.2 % | 23.1 % |
 | Capture to result, median, ms | 41.90 | 39.46 | 41.34 |
 
-**Halving was expected to free D, and did not:** the bins move with how much was moving, and the shares do not change enough to tell apart. References: L at 64,432, R at 1376,192, 320 x 320, 34 and 16 of 128 features, +0.0 px/s, 2 chosen in 70 s, of which 36 s had over 800 cells moving. `out/host/autoref_check`: 8 of 8.
+**Halving was expected to free D, and did not:** the bins move with how much was moving, and the shares do not change enough to tell apart. References: L at 64,432, R at 1376,192, 320 x 320, 34 and 16 of 128 features, +0.0 px/s, 2 chosen in 70 s, of which 36 s had over 800 cells moving over all three. `out/host/autoref_check`: 8 of 8.
 
 ## Camera D's own reference (2026-11-03 19:48 to 19:59; `logs/live/gim-20261103-194825.csv` read only, `logs/live/gim-20261103-195812.csv` applied; `out/host/gimref_check`, `out/host/gim_track_check`)
 
@@ -835,7 +835,7 @@ Every result hash of all 27 scenes is that of the build before, on the host, and
 
 ## L and R at native 30, D at 15 doubled to 30 (the operator's order, 2026-11-03 20:02; `logs/live/rates-20261103-200336.csv`, `gim-20261103-200706.csv`, shown csvs)
 
-| Cells moving | Seconds | Shown L, R, D | Capture to result, ms |
+| Cells moving, all three | Seconds | Shown L, R, D | Capture to result, ms |
 | --- | --- | --- | --- |
 | under 300 | 228 | 29.5, 29.5, 22.4 | 31.18 |
 | 300 to 800 | 43 | 30.0, 30.0, 21.0 | 31.77 |
@@ -849,6 +849,38 @@ Over the last 30 s: 30.00, 30.03, 21.50 shown a second, capture to screen 46.3, 
 
 Every frame through all of FSR left 33 ms for each, and one took 41.5 ms live: 21.50 a second, a third of real frames skipped. A generated frame now goes through without touching FSR's history: input, source rows, then a read of the history where nothing moved, and the history brought over by half a step and held to this frame where something did; RCAS, Lanczos. Nothing invented enters the history. On an idle card, at real size, 6.51 ms against 28.37 ms for a real frame. Card = host at 640x480 and 1280x720.
 
-Live, 98 s with under 300 cells moving: **L 30.00, R 30.00, D 30.03 pictures a second, 0 of 833 real frames skipped**, gaps between D's pictures median 33.6, p95 35.4, p99 37.6, max 41.5 ms. Capture to screen 41.6, 50.0, 136.5 ms, D's down from 192.9. Capture to result 32.11 ms. D's reference: 0 moves in 1,494 frames. **Heavy motion was not in this run.**
+Live, 98 s with under 300 cells moving over all three: **L 30.00, R 30.00, D 30.03 pictures a second, 0 of 833 real frames skipped**, gaps between D's pictures median 33.6, p95 35.4, p99 37.6, max 41.5 ms. Capture to screen 41.6, 50.0, 136.5 ms, D's down from 192.9. Capture to result 32.11 ms. D's reference: 0 moves in 1,494 frames. **Heavy motion was not in this run.**
 
 Against the clean truth, host: real frames as before the flow moved first, `hold` 48.84 dB, `bigbox` 42.49 dB. Generated, against the truth half way, now reported by `vt_replay` as `fsrgen`: `hold` 48.76 dB, `bigbox` 41.49 dB, `dart` 37.78 dB, the thing itself on `dart` 23.14 dB against 19.19 for the last real frame upscaled.
+
+## The whole session, and D under its own motion (2026-11-03 20:28 to 23:30; `logs/live/rates-20261103-202823.csv`, `shown-20261103-202821.csv`, `gim-20261103-202821.csv`, `attitude-20261103-202823.csv`, `depth-20261103-202823.csv`, by awk)
+
+**A correction first.** A first reading of this session said D held 29.9 a second over 8 s of motion. Those seconds summed the moving cells of all three cameras, and D's own count was under 300 in every one. Every "cells moving" bin above from 18:23 on is that same sum, though only the first said so. Recomputed from the rates files: 18:23 and 19:20 come within a row per bin, 18:30 and 19:32 exactly; the 20:03 table does not reproduce (221, 61, 77 against 228, 43, 88, on what I take to be its rows). None of them says what D's own motion costs. This does.
+
+Over 10,798 s, first and last seconds left out:
+
+| | L | R | D |
+| --- | --- | --- | --- |
+| Pictures a second | 29.970 | 30.000 | 30.013 |
+| Largest gap between pictures, ms | 78.2 | 57.5 | 67.0 |
+| Capture to screen, median, p95, p99, ms | 40.1, 49.2, 50.7 | 46.2, 55.2, 57.5 | 135.6, 141.7, 168.9 |
+| Mean cells moving | 24.77 of 4,080 | 92.73 of 4,080 | 10.62 of 1,800 |
+
+Orange frames 14.99, 15.00 and 15.02 a second. Capture to result median 31.06, p95 33.86, p99 35.89 ms. A map 14.38 ms at the median, p95 15.23, with 10.09 % of textured pixels confident on average.
+
+| D's own cells moving, read once a second | Seconds | D shown a second | Its lowest second | Real frames a second | Maps a second |
+| --- | --- | --- | --- | --- | --- |
+| under 100 | 10,435 | 30.05 | 27 | 15.02 | 15.03 |
+| 100 to 299 | 179 | 29.94 | 24 | 14.98 | 15.01 |
+| 300 to 599 | 104 | 28.42 | 23 | 14.19 | 14.92 |
+| 600 or more | 38 | 24.58 | 22 | 12.29 | 14.70 |
+
+**D does not hold 30 when much moves in its own picture.** 197 gaps over 100 ms among 162,040 real frames, the largest 136.0 ms: one real frame missing, each time. By the table about 187 of them lie in the last two rows (arithmetic). L and R moving does not do it: with theirs at 800 or more together and D's under 100, 20 s, D read 29.95, lowest 29, 15.05 real. Which stage runs long under D's motion is not separated. The count is one frame's, once a second, so the bins are rough.
+
+**D's reference: no false move, and one real move missed.** 0 moves in 163,467 frames, 142 s of them at 300 or more of D's own cells; two or more windows on 99.64 %; 584 microseconds at the median, p95 642. The largest reading, 8.64, -3.94 px with 581 lines moving, was not believed, and half of all that had long been still moved on only 2 frames.
+
+**D moved at 23:26:21, by every other witness, and its reference did not say so.** L read 1,296 cells, R 786, D 786. L and R's turn kernels stayed at correlation 0.98 and 0.997. D's fell from 0.999 to 0.018 and stayed there: `camera D cannot find itself`. D's lights, read fresh with no memory, went from -0.76, 2.79 px to 0.04, 16.61 over 242 fixes, 13.8 px, and stayed. Over the 299 frames around it the reference read at most 2.06 px, half of all still reached 144 per mille at most, 162 frames were unsure and 120 had under two windows: no move, and the head was not shifted. All 3,645 frames since read unsure, none still: it stopped vouching, but it never called the move. Why the turn kernel cannot find a 14 px shift, inside what it searches, is not separated. There is no truth for how far D went.
+
+**R turned at 21:06:48, the turn kernel's first real one.** Tilt +0.068, pan -0.455, roll -0.010 degrees at correlation 0.634, then +0.025, -0.436, -0.008 at 0.892 by 21:06:53; the geometry carried and kept on file. R's whole grid, 4,080 cells, read moving within about 3 s of it (the two clocks lined up by their first rows). L and D read no turn. R's lights went from 4.61, 2.76 to 4.23, 12.48 over 5,061 fixes and stayed. **So something moved and stayed, and the two witnesses disagree on what:** 0.436 degrees at fb 1095.8 is 8.3 px across (arithmetic), where the lights moved 9.7 px down and 0.4 across. Not resolved. An earlier 4,080 at 20:52:12 had no turn read, and R's lights moved 1.81 px across, under the 0.1 degree the kernel leaves alone (1.9 px, arithmetic); whether that was the same kind of event is not known.
+
+L and R's references: 14 chosen, 5 on L and 9 on R. The log does not say why each was replaced.
