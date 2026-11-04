@@ -1,5 +1,5 @@
-/* fsr3.h: AMD FidelityFX Super Resolution 3.1.6, the temporal upscaler, as MVEX on the card, for one grey camera, and what the user ordered after it: real frames up by FSR, the frame half way between two pictures by optical flow, and a
- * Lanczos down to the size shown. Camera D: 720p15, 1440p15, 1440p30, 1080p30.
+/* fsr3.h: AMD FidelityFX Super Resolution 3.1.6, the temporal upscaler, as MVEX on the card, for one grey camera, and what the user ordered around it: optical flow first at the camera's size, then every frame up by FSR, and a
+ * Lanczos down to the size shown. Camera D: 720p12, by the flow 720p24, 1440p24, 1080p24.
  *
  * Passes, as the shaders have them: the luma, the shading change (sorted 5-sample sets, a pyramid of three mips), reactivity and accumulation, luma instability, the accumulate pass (history reprojected through a Lanczos 2 sampler with
  * deringing, a Lanczos of the new frame, a rectification box, thin-feature locks), RCAS with its denoise. Everything a shader computes per pixel and a camera makes constant is computed once:
@@ -11,7 +11,7 @@
  *   depth      none exists at this rate. A moving block stands for near and a still one for far: disocclusion is a still block under where a moving block was, what FSR's reconstructed depth finds with a real depth buffer
  *   reactive   one value a block, from how the motion field diverges
  * Lanes of the output cannot use gather either: 16 output columns span under 16 source columns, so a permute with a table made at the start fetches them. Each source row is filtered across once, and an output row mixes four of them.
- * Nothing invented enters the history: generated frames are made from the finished pictures, afterwards.
+ * By the operator's order, 2026-11-03, the flow comes first: its generated frames enter like any other, half a real step from the real frames on each side, so what is invented does enter the history. history_steps says how far back that history lies in the steps of mv_scale, for when frames were let go.
  *
  * Every stage takes (tid, n): a team may run it in parts, and the answer does not depend on how many threads. The same source is native MVEX on the card and a bit-exact model on the host.
  *
@@ -34,17 +34,13 @@ size_t fsr_bytes(int rw, int rh, int uw, int uh, int dw, int dh);
 /* sharpness: RCAS stops, 0 the sharpest. NULL if the sizes cannot work. */
 struct fsr *fsr_init(void *mem, int rw, int rh, int uw, int uh, int dw, int dh, long double sharpness);
 /* The newest frame and the one before it as planes of Q6 grey, and the field between them, blocks of 16 x 16 at this resolution (fg_job.fil[0], level 1). mv_scale: how much of a whole vector lies between these two frames. */
-void fsr_begin(struct fsr *f, const struct vt_plane *cur, const struct vt_plane *prev, const struct fg_field *field, long double mv_scale, int scene_changed);
+void fsr_begin(struct fsr *f, const struct vt_plane *cur, const struct vt_plane *prev, const struct fg_field *field, long double mv_scale, long double history_steps, int scene_changed);
 /* One stage, one thread's part. In order; each over all threads before the next. */
 void fsr_stage(struct fsr *f, int stage, int tid, int n);
 /* After all threads have done a stage: its padding. Thread 0. */
 void fsr_stage_end(struct fsr *f, int stage);
-/* After the stages: the frame half way between the last two pictures, by the vectors at the middle instant (fg_job.mid). */
-void fsr_mid_begin(struct fsr *f, const struct fg_field *mid);
-void fsr_mid_stage(struct fsr *f, int tid, int n);
-void fsr_mid_end(struct fsr *f);
-/* A picture as bytes, in thread parts, at the size it goes out: the newest (mid 0), or the one half way (mid 1). 64 B aligned. */
-void fsr_picture(const struct fsr *f, int mid, uint8_t *pixels, int tid, int n);
+/* The picture as bytes, in thread parts, at the size it goes out. 64 B aligned. */
+void fsr_picture(const struct fsr *f, uint8_t *pixels, int tid, int n);
 /* The frame is done: what it wrote is now the history. */
 /* The second stage for any plane of the upscaled size, not only FSR's own: the same tables, row_used saying which of its rows are worth reading. fsr_down_span finds the rows of the result worth writing; 0 if none. Each thread has its own temp of fsr_down_temp_bytes. */
 size_t fsr_down_temp_bytes(const struct fsr *f);

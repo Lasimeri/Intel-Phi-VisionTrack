@@ -37,7 +37,10 @@ void tk_generated_result(const struct tracker *t, const struct vt_msg *gm, const
 void tk_set_picture(struct tracker *t, uint8_t *pixels);
 /* This tracker's camera goes through FSR 3 (src/kern/fsr3.h): up to up_w x up_h and by Lanczos to w x h, or with up_w 0 straight to w x h. tk_fsr_frame: after a tk_generate of a real frame that returned a set: the real picture in pixels_real, and the one half way from the last, by flow, in pixels_generated. */
 int tk_fsr_setup(struct tracker *t, int up_w, int up_h, int w, int h, long double sharpness, tk_alloc_fn alloc, void *ctx, uint8_t *pixels_generated, uint8_t *pixels_real, tk_run_fn run, void *run_ctx);
+/* A real frame and the one tk_generate made before it, both through FSR, in that order. tk_fsr_frame does it all; apart: tk_fsr_take on the thread that runs tk_generate, with how many real frames were let go since FSR last had one, then tk_fsr_one for the generated frame (0) and the real one (1), on any. */
 void tk_fsr_frame(struct tracker *t);
+void tk_fsr_take(struct tracker *t, int skipped);
+void tk_fsr_one(struct tracker *t, int which);
 void tk_fsr_report(const struct tracker *t, const char *name, double cycles_per_us);
 const struct fsr *tk_fsr_of(const struct tracker *t);
 /* The appearance correlation of a zero-mean template of 32 x 21 against a plane at (x, y): what the search for a lost region is built on, exposed for its gate. */

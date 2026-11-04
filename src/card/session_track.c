@@ -291,7 +291,7 @@ struct fsr_worker {
     int cpus[256], core_of[256], n;
     struct team *team;
     uint64_t instance;
-    uint32_t want VT_CACHELINE, ready VT_CACHELINE, sent VT_CACHELINE;
+    uint32_t want VT_CACHELINE, ready_mid VT_CACHELINE, ready VT_CACHELINE, sent VT_CACHELINE;
     int stop VT_CACHELINE, team_ok, frames, dropped;
     struct live_depth *ld;
     struct cam_job cams[VT_CELL_CAMERAS];
@@ -333,7 +333,11 @@ static void *fsr_worker_main(void *arg)
             continue;
         }
         seen = job;
-        tk_fsr_frame(w->t);
+        /* The generated frame, then the real one: each picture may go as soon as it exists. L and R between them. */
+        tk_fsr_one(w->t, 0);
+        __atomic_store_n(&w->ready_mid, job, __ATOMIC_RELEASE);
+        fsr_worker_cams(w);
+        tk_fsr_one(w->t, 1);
         __atomic_store_n(&w->ready, job, __ATOMIC_RELEASE);
     }
     team_destroy(w->team);
@@ -446,16 +450,15 @@ static uint64_t vec_publish(struct vt_dma *dma, const struct arena *a, const str
     return vt_dma_copy(dma, meta_phys, host_meta, sizeof *meta, host_pub, seq + 1);
 }
 
-/* The two finished pictures and what they were, on the channel: the word that names them last. */
-static uint64_t fsr_publish(struct vt_dma *dma, const struct arena *a, uint8_t *const *pics, const struct vt_config *cfg, struct vt_fsr_meta *meta, uint64_t meta_phys, uint64_t host_meta, uint64_t host_pub, uint64_t seq, uint64_t instance)
+/* A finished picture and what it was, on the channel: the word that names it last. */
+static uint64_t fsr_publish(struct vt_dma *dma, const struct arena *a, uint8_t *pic, int mid, const struct vt_config *cfg, struct vt_fsr_meta *meta, uint64_t meta_phys, uint64_t host_meta, uint64_t host_pub, uint64_t seq, uint64_t instance)
 {
-    const uint32_t mid = (uint32_t)(2u * seq % VT_FSR_SLOTS), slot = mid + 1u;
-    const uint64_t bytes = (uint64_t)cfg->fsr_w * cfg->fsr_h;
-    if (!copy_range(dma, a, pics[0], dma->region_addr + VT_PART_OFFSET + vt_fsr_offset(mid), bytes, 0) || !copy_range(dma, a, pics[1], dma->region_addr + VT_PART_OFFSET + vt_fsr_offset(slot), bytes, 0))
+    const uint32_t slot = (uint32_t)(seq % VT_FSR_SLOTS);
+    if (!copy_range(dma, a, pic, dma->region_addr + VT_PART_OFFSET + vt_fsr_offset(slot), (uint64_t)cfg->fsr_w * cfg->fsr_h, 0))
         return 0;
     meta->instance = instance;
-    meta->slot = slot;
-    meta->slot_mid = mid;
+    meta->slot = mid ? VT_FSR_SLOTS : slot;
+    meta->slot_mid = mid ? slot : VT_FSR_SLOTS;
     meta->w = cfg->fsr_w;
     meta->h = cfg->fsr_h;
     return vt_dma_copy(dma, meta_phys, host_meta, sizeof *meta, host_pub, seq + 1);
@@ -598,7 +601,9 @@ int session_track(struct vt_ctl *ctl, struct vt_dma *dma, const struct topo *top
     static struct fsr_worker fsr_w;
     memset(&fsr_w, 0, sizeof fsr_w);
     pthread_t fsr_th;
-    uint32_t fsr_ready_seen = 0;
+    uint32_t fsr_ready_seen = 0, fsr_mid_seen = 0;
+    int fsr_pending = 0, fsr_skipped = 0;
+    uint64_t fsr_pending_instance = 0;
     uint64_t fsr_seq = 0;
     uint64_t fsr_job_instance = 0;
     if (cfg->fsr_camera) {
@@ -753,25 +758,41 @@ int session_track(struct vt_ctl *ctl, struct vt_dma *dma, const struct topo *top
     uint64_t depth_cycles = 0;
     uint64_t npub = 0; /* results sent: one per frame taken, and one per frame generated */
     for (;;) {
-        /* What FSR has finished, whenever it finishes. */
+        /* What FSR has finished, whenever it finishes: the generated frame's picture, then the real one's. */
         if (cfg->fsr_async) {
-            const uint32_t r = __atomic_load_n(&fsr_w.ready, __ATOMIC_ACQUIRE);
-            if (r != fsr_ready_seen) {
+            int fsr_failed = 0;
+            for (int which = 0; which < 2 && !fsr_failed; which++) {
+                const uint32_t r = __atomic_load_n(which ? &fsr_w.ready : &fsr_w.ready_mid, __ATOMIC_ACQUIRE);
+                uint32_t *was = which ? &fsr_ready_seen : &fsr_mid_seen;
+                if (r == *was)
+                    continue;
                 /* The meta and its picture are read by the channel: the last copy goes first. */
                 if (last_dma && vt_dma_wait(dma, last_dma, 5.0)) {
-                    fprintf(stderr, "vtrackd: result DMA timed out\n");
-                    rc = -1;
+                    fsr_failed = 1;
                     break;
                 }
-                const uint64_t dma_done = fsr_publish(dma, &a, fsr_pics, cfg, fsr_meta, fsr_meta_phys, dma->region_addr + VT_PART_OFFSET + offsetof(struct vt_ctl, fsr_meta), dma->region_addr + VT_PART_OFFSET + offsetof(struct vt_ctl, fsr_pub), fsr_seq, fsr_job_instance);
+                const uint64_t dma_done = fsr_publish(dma, &a, fsr_pics[which], !which, cfg, fsr_meta, fsr_meta_phys, dma->region_addr + VT_PART_OFFSET + offsetof(struct vt_ctl, fsr_meta), dma->region_addr + VT_PART_OFFSET + offsetof(struct vt_ctl, fsr_pub), fsr_seq, fsr_job_instance);
                 if (!dma_done) {
-                    fprintf(stderr, "vtrackd: FSR picture copy refused\n");
-                    rc = -1;
+                    fsr_failed = 1;
                     break;
                 }
                 last_dma = dma_done;
                 fsr_seq++;
-                fsr_ready_seen = r;
+                *was = r;
+            }
+            if (fsr_failed) {
+                fprintf(stderr, "vtrackd: FSR picture copy refused or timed out\n");
+                rc = -1;
+                break;
+            }
+            /* The newest real frame that came while it was busy goes the moment it is free: a little late costs a little, not a whole frame. */
+            if (fsr_pending && fsr_ready_seen == fsr_w.want) {
+                fsr_pending = 0;
+                tk_fsr_take(fsr_cam <= 0 ? tr : trk[fsr_cam], fsr_skipped);
+                fsr_skipped = 0;
+                fsr_job_instance = fsr_pending_instance;
+                __atomic_store_n(&fsr_w.want, fsr_w.want + 1u, __ATOMIC_RELEASE);
+                fsr_w.frames++;
             }
         }
         /* L and R's vectors the same way, on FSR's team. */
@@ -945,13 +966,18 @@ int session_track(struct vt_ctl *ctl, struct vt_dma *dma, const struct topo *top
             const int gen_set = tk_generate(cur, set, m, &gm);
             const uint64_t t_gen = vt_tsc();
             if (gen_set >= 0 && fsr_cam == cam && cfg->fsr_async) {
-                /* Free only once the last job's pictures have gone. */
+                /* Free only once the last job's pictures have gone. If not, the newest waits; the one it replaces is the one let go. */
                 if (fsr_ready_seen == fsr_w.want) {
+                    tk_fsr_take(cur, fsr_skipped);
+                    fsr_skipped = 0;
                     fsr_job_instance = m->instance;
                     __atomic_store_n(&fsr_w.want, fsr_w.want + 1u, __ATOMIC_RELEASE);
                     fsr_w.frames++;
                 } else {
-                    fsr_w.dropped++;
+                    fsr_w.dropped += fsr_pending;
+                    fsr_skipped += fsr_pending;
+                    fsr_pending = 1;
+                    fsr_pending_instance = m->instance;
                 }
             } else if (gen_set >= 0 && fsr_cam == cam)
                 tk_fsr_frame(cur);

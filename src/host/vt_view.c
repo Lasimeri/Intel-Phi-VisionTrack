@@ -304,7 +304,7 @@ static void session_config(struct vt_config *c)
         c->flow_level = (uint32_t)A.flow_level;
         c->framegen = (uint32_t)A.framegen;
         c->gen_pictures = (uint32_t)A.framegen;
-        /* 720p12 up to 1440p by FSR, doubled to 24 a second by the flow from the pictures, and a Lanczos to 1080p: the user's order, 2026-11-03. */
+        /* 720p12 doubled to 24 a second by the flow, at that size, every frame up to 1440p by FSR, and a Lanczos to 1080p: the user's order, 2026-11-03. */
         if (A.fsr && A.framegen) {
             c->fsr_camera = 3;
             c->fsr_up_w = 2u * (uint32_t)A.c[2].w;
@@ -607,11 +607,11 @@ static void *link_main(void *arg)
             struct cam *F = &A.c[A.fsr_cam];
             const struct vt_result *row_real = &F->row_at[(finst & 15u) * 2u], *row_mid = &F->row_at[(finst & 15u) * 2u + 1u];
             pthread_mutex_lock(&A.m);
-            if (fslot < VT_FSR_SLOTS && fmid < VT_FSR_SLOTS && row_real->hdr.instance == finst) {
-                if (row_mid->hdr.instance == finst)
-                    show_push(F, row_mid, A.l.part + vt_fsr_offset(fmid), 1);
+            /* One picture at a time now, each as soon as it exists; the other slot says none. */
+            if (fmid < VT_FSR_SLOTS && row_mid->hdr.instance == finst)
+                show_push(F, row_mid, A.l.part + vt_fsr_offset(fmid), 1);
+            if (fslot < VT_FSR_SLOTS && row_real->hdr.instance == finst)
                 show_push(F, row_real, A.l.part + vt_fsr_offset(fslot), 0);
-            }
             pthread_mutex_unlock(&A.m);
         }
         /* A frame's vectors of L or R, likewise. */
@@ -1331,7 +1331,7 @@ int main(int argc, char **argv)
     /* The rates are the user's, 11-03. In MJPEG this camera claims its largest alternate setting at any frame rate, so it must not share a USB 2 bus with the NexiGo, which does the same: STREAMON
      * answers ENOSPC. Measured at 720p15 and 1080p30 on one bus; solved by the two being on different controllers. */
     d->fps = 25;
-    d->rate = 12.0; /* half of L and R's, the operator's order. Of its own 25: 80 ms apart with one gap of 120 a second, where 12 of 15 would leave a gap of 133 every fifth */
+    d->rate = 12.0; /* half of L and R's, the operator's order. Asked for 25, it delivers about 14.9 in a dim room (dynamic exposure, 67 ms), so these land about 70 or 140 ms apart: measured 2026-11-03 */
     A.ncam = 3;
     A.mirror = 1;
     A.levels = 5;
@@ -1791,7 +1791,7 @@ int main(int argc, char **argv)
             }
             panel_line(&v, &y, DIM, "correspondences %llu  contrast %s  blur %s", (unsigned long long)pairs, contrast ? "on" : "off", pre_gauss ? "on" : "off");
             if (A.fsr)
-                panel_line(&v, &y, DIM, "D: FSR 720p%.4g > flow 1440p%.4g > Lanczos 1080p  RCAS %.1f stops  [ ] change it", A.c[2].rate, 2.0 * A.c[2].rate, (double)A.fsr_sharp);
+                panel_line(&v, &y, DIM, "D: flow 720p%.4g > 720p%.4g > FSR 1440p > Lanczos 1080p  RCAS %.1f stops  [ ] change it", A.c[2].rate, 2.0 * A.c[2].rate, (double)A.fsr_sharp);
             if (A.ncam == 3 && map) {
                 const struct vt_depth_out *h = map;
                 const double us = 1e-3 / TSC_HZ * 1e6;

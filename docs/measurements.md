@@ -799,3 +799,15 @@ Over the last 30 s: 48.03, 48.00 and 23.17 shown a second, capture to screen 80.
 Tolerances: 27 of 27 scenes before and after, on the host. Card = host on `passby`, `dart`, `bigbox`, `jointed`, `rotate`; `vt_vd`, with its checks of the box, identical.
 
 **The first version failed `passby`.** It dropped every feature outside the box, moving head or stopped. What a passer has dragged out is how a stopped head knows it for an outsider, and without those the head started on it at frame 105, 180 to 300 px off. Dropping only those gone still failed too. So a stopped head never drops them: it follows them, and they can start nothing.
+
+## Camera D: the flow first, then FSR on every frame (the operator's order, 2026-11-03 18:46; `logs/live/rates-20261103-192014.csv`, shown csv)
+
+720p12, by the flow 720p24, each frame to 1440p by FSR, Lanczos to 1080p. Card = host at 640x480 and 1280x720. On a host check against the clean truth, `hold` 48.84 to 48.10 dB, `bigbox` 42.49 to 43.39 dB, a bug detector and no verdict on looks. Alone on the card an FSR frame takes 28.86 ms.
+
+| Cells moving | Seconds | Shown L, R, D | Orange L, R, D | Maps | Capture to result, ms |
+| --- | --- | --- | --- | --- | --- |
+| under 300 | 46 | 48.0, 48.0, 19.5 | 20.7, 20.5, 12.0 | 12.0 | 41.90 |
+| 300 to 800 | 10 | 47.8, 47.9, 19.0 | 19.3, 19.6, 11.9 | 12.1 | 42.08 |
+| over 800 | 20 | 47.9, 47.9, 17.3 | 17.9, 17.6, 11.9 | 11.8 | 41.80 |
+
+**It does not fit: 19.60 of 24 pictures a second over 30 s, 194 of 918 real frames skipped (21.1 %).** Capture to screen 81.1, 82.7, 222.5 ms. D's frames land 70 ms apart 342 times and 140 ms apart 371 times: asked for 25, its dynamic exposure of 67 ms delivers about 14.9 a second. An earlier claim here of an even 80 ms was wrong.
