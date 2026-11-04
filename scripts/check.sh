@@ -81,6 +81,9 @@ if scripts/scene.sh dual 640x480 --dual --gate --framegen >"$s/scene" 2>&1; then
 if scripts/scene.sh dualbox 640x480 --dual --gate --framegen >"$s/scene" 2>&1; then pass "scene dualbox with generated frames: tolerances and replay"; else fail "scene dualbox with generated frames"; /usr/bin/grep -aE 'GATE|replay' "$s/scene" | head -6; fi
 if scripts/scene.sh dual 640x480 --dual --gate >"$s/scene" 2>&1; then pass "scene dual, two independently tracked views: tolerances and replay"; else fail "scene dual"; /usr/bin/grep -aE 'GATE|replay' "$s/scene" | head -6; fi
 if scripts/scene.sh dualbox 640x480 --dual --gate >"$s/scene" 2>&1; then pass "scene dualbox, two boxes drawn by hand over a still thing: tolerances and replay"; else fail "scene dualbox"; /usr/bin/grep -aE 'GATE|replay' "$s/scene" | head -6; fi
+# L and R's static regions: chosen from motion and texture, against pictures whose answers are known.
+out/host/autoref_check >"$s/ar" 2>&1 && pass "static references: every check" || { fail "static references"; /usr/bin/grep -a FAIL "$s/ar" | head -4; }
+
 # The orange vectors: drawn at the upscaled size, down with FSR's tables, card = host; where they land, what is left after the next erase, and that erasing beats clearing, on the card's own clock.
 out/host/vd_ref >"$s/vdh" 2>&1 && pass "orange vectors: every check on the host" || { fail "orange vectors on the host"; /usr/bin/grep -a FAIL "$s/vdh" | head -4; }
 scripts/card_run.sh -p 256 vt_vd >"$s/vdc" 2>&1 && pass "orange vectors: every check on the card" || { fail "orange vectors on the card"; /usr/bin/grep -a FAIL "$s/vdc" | head -4; }

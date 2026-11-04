@@ -811,3 +811,14 @@ Tolerances: 27 of 27 scenes before and after, on the host. Card = host on `passb
 | over 800 | 20 | 47.9, 47.9, 17.3 | 17.9, 17.6, 11.9 | 11.8 | 41.80 |
 
 **It does not fit: 19.60 of 24 pictures a second over 30 s, 194 of 918 real frames skipped (21.1 %).** Capture to screen 81.1, 82.7, 222.5 ms. D's frames land 70 ms apart 342 times and 140 ms apart 371 times: asked for 25, its dynamic exposure of 67 ms delivers about 14.9 a second. An earlier claim here of an even 80 ms was wrong.
+
+## L and R at half their vector rate, then as static references (2026-11-03 19:27 to 19:33; `logs/live/rates-20261103-192736.csv`, `rates-20261103-193204.csv`, shown csvs)
+
+| Over 30 s | Before halving | Halved | With references |
+| --- | --- | --- | --- |
+| Shown L, R, D a second | 47.97, 48.00, 19.60 | 48.00, 48.03, 18.17 | 47.93, 48.00, 18.33 |
+| Orange L, R, D a second, in the lowest motion bin | 20.7, 20.5, 12.0 | 12.0, 12.0, 12.0 | 11.9, 12.0, 12.1 |
+| FSR's real frames skipped | 21.1 % | 20.2 % | 23.1 % |
+| Capture to result, median, ms | 41.90 | 39.46 | 41.34 |
+
+**Halving was expected to free D, and did not:** the bins move with how much was moving, and the shares do not change enough to tell apart. References: L at 64,432, R at 1376,192, 320 x 320, 34 and 16 of 128 features, +0.0 px/s, 2 chosen in 70 s, of which 36 s had over 800 cells moving. `out/host/autoref_check`: 8 of 8.

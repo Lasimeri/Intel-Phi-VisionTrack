@@ -17,7 +17,7 @@ CARD_CFLAGS := --target=x86_64-unknown-linux-musl -march=knc --sysroot=$(KNC_SYS
                -ffp-contract=off -fno-math-errno -fno-jump-tables -falign-loops=1 -fPIE $(COMMON_INC) -MMD -MP
 
 CARD_PROGS := vt_m0 vt_m1 vt_m2 vt_m3 vt_vd vtrackd
-HOST_PROGS := m0_ref m1_ref m2_ref m3_ref vd_ref vt_xfer vt_quit vt_run vt_replay vt_fsrtrack vt_view vt_calib vt_stitch vt_align vt_gridpng vt_rigcheck vt_stars vt_mapstat vt_mapcheck vt_attitude vt_agree vt_ncc_check
+HOST_PROGS := m0_ref m1_ref m2_ref m3_ref vd_ref autoref_check vt_xfer vt_quit vt_run vt_replay vt_fsrtrack vt_view vt_calib vt_stitch vt_align vt_gridpng vt_rigcheck vt_stars vt_mapstat vt_mapcheck vt_attitude vt_agree vt_ncc_check
 
 KERN_ALL := kern/img_ref kern/img_vx kern/lk_ref kern/lk_vx kern/detect kern/framegen kern/fsr3 kern/vecdraw kern/stereo kern/kalman kern/fuse kern/track kern/depth kern/still kern/attitude
 HOST_LIB := host/vt_link host/dataset host/synth host/run_opts host/score
@@ -29,6 +29,7 @@ m1_ref_OBJS := host/m1_ref kern/img_ref kern/img_vx
 vt_m2_OBJS := card/m2_gate kern/lk_ref kern/lk_vx kern/img_ref kern/img_vx card/arena card/topo card/team
 m2_ref_OBJS := host/m2_ref kern/lk_ref kern/lk_vx kern/img_ref kern/img_vx
 vt_vd_OBJS := card/vd_gate kern/vecdraw kern/fsr3 kern/framegen kern/img_ref kern/img_vx kern/vx_gather
+autoref_check_OBJS := host/autoref_check host/autoref
 vd_ref_OBJS := host/vd_ref kern/vecdraw kern/fsr3 kern/framegen kern/img_ref kern/img_vx
 vt_m3_OBJS := card/m3_gate kern/depth kern/attitude kern/vx_gather kern/still kern/lk_ref kern/lk_vx kern/img_ref kern/img_vx card/arena card/topo card/team
 m3_ref_OBJS := host/m3_ref host/calib host/stars kern/depth kern/attitude kern/still kern/lk_ref kern/lk_vx kern/img_ref kern/img_vx
@@ -39,7 +40,7 @@ vt_run_OBJS := host/vt_run $(HOST_LIB)
 vt_replay_OBJS := host/vt_replay $(HOST_LIB) $(KERN_ALL)
 vt_fsrtrack_OBJS := host/vt_fsrtrack $(HOST_LIB) $(KERN_ALL)
 vt_ncc_check_OBJS := host/vt_ncc_check $(KERN_ALL)
-vt_view_OBJS := host/vt_view host/depthview host/v4l2cap host/x11view host/vt_link host/dataset host/synth host/calib host/stars kern/attitude kern/depth kern/img_ref kern/img_vx
+vt_view_OBJS := host/vt_view host/autoref host/depthview host/v4l2cap host/x11view host/vt_link host/dataset host/synth host/calib host/stars kern/attitude kern/depth kern/img_ref kern/img_vx
 vt_view_LIBS := -lX11 -lXext -lturbojpeg
 vt_calib_OBJS := host/vt_calib host/calib
 vt_stitch_OBJS := host/vt_stitch host/calib

@@ -35,5 +35,7 @@ int fuse_triangulate(const struct fuse *f, long double ua, long double va, long 
 
 /* A tracker's result for one camera: remembers it; when it comes from camera B, triangulates and updates the filter; always writes the filter's output into the result. */
 void fuse_frame(struct fuse *f, int camera, struct vt_result *r);
+/* This camera's region is not the thing the other's is: nothing is to be triangulated from it. */
+void fuse_no_view(struct fuse *f, int camera);
 
 #endif

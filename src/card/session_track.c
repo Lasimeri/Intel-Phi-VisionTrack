@@ -1003,8 +1003,13 @@ int session_track(struct vt_ctl *ctl, struct vt_dma *dma, const struct topo *top
                     ld_set_calib(ld, &local, seq_now);
             }
             const uint64_t t2 = vt_tsc();
-            if (cam < 2)
-                fuse_frame(&fu, cam, res);
+            if (cam < 2) {
+                /* A static reference of L or R is not the thing the other camera sees: no 3D from it, the window having left the estimate out of the frame's orders. */
+                if (m->dest & VT_PIPE_EST)
+                    fuse_frame(&fu, cam, res);
+                else
+                    fuse_no_view(&fu, cam);
+            }
             res->cycles[VT_T_EST] = vt_tsc() - t2;
             if (ld) {
                 /* L and R are camera D's static reference: their vectors at half their rate, the operator's order, 2026-11-03. */

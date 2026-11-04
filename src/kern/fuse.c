@@ -235,3 +235,5 @@ void fuse_frame(struct fuse *f, int camera, struct vt_result *r)
             r->flags |= VT_F_UNPROVEN;
     }
 }
+
+void fuse_no_view(struct fuse *f, int camera) { f->obs[camera & 1].valid = 0; }

@@ -35,6 +35,7 @@
 #include "stars.h"
 #include "v4l2cap.h"
 #include "vt_link.h"
+#include "autoref.h"
 #include "x11view.h"
 
 #define RING 32
@@ -77,6 +78,9 @@ struct cam {
     int w, h, fps;          /* what the device is asked for */
     double rate;            /* frames a second kept of those: the operator's order, 2026-11-03. Each is half of what is shown */
     int steady;             /* exposure may not lower the device's rate: the operator's order for camera D, 2026-11-03 */
+    /* L and R's static reference for camera D, found by itself: the operator's order, 2026-11-03. A box the operator draws there stands instead, until it is taken away. */
+    struct autoref *ref;
+    int ref_on, ref_mine, ref_col, ref_row, ref_wait;
     uint64_t next_ns, skipped; /* when the next one to keep is due; how many have been let go */
     uint8_t *ring;
     uint64_t acq[RING];
@@ -131,6 +135,7 @@ static struct {
     struct vec_plane { uint64_t instance; uint32_t y0, y1, w, valid; } vec_at[VT_VEC_SLOTS];
     struct vt_vec_meta vec_last;
     uint64_t vec_count;
+    int ref; /* L and R look after themselves */
     /* L and R's vectors, a frame at a time, each slot's instant. */
     struct cells_plane { uint64_t instance; uint32_t cols, rows, level, valid; } cells_at[VT_CELL_CAMERAS][VT_CELL_SLOTS];
     uint64_t cells_count[VT_CELL_CAMERAS];
@@ -193,6 +198,41 @@ static void integrate_frame(struct cam *k, const uint8_t *g)
         fprintf(stderr, "vt_view: snap camera %d: %u frames integrated, %s\n", cam, n, path);
     }
     free(o);
+}
+
+#define REF_SIZE 320      /* a reference's box, in the camera's pixels */
+#define REF_EVERY 12      /* frames of its vectors between choices: a second, at their rate */
+#define REF_D_MOVING 3    /* lines of camera D's: it is moving */
+
+/* One frame's vectors of L or R: where it holds still, and whether what it holds still does. A reference that something has moved in, or that the tracker has started after, is no reference any more. */
+static void ref_step(struct cam *K, const struct vt_cell *cells, const struct vt_cells_meta *cm)
+{
+    if (!K->ref)
+        K->ref = autoref_create((int)cm->cols, (int)cm->rows);
+    if (!K->ref)
+        return;
+    autoref_feed(K->ref, cells, A.vec_last.lines >= REF_D_MOVING);
+    K->ref_wait -= K->ref_wait > 0;
+    if (K->ref_mine || K->ref_wait)
+        return;
+    const int cw = VT_CELL_W << cm->level, ch = VT_CELL_H << cm->level, wc = REF_SIZE / cw, wr = REF_SIZE / ch;
+    const struct vt_result *r = &K->last;
+    const int holding = K->ref_on && (r->state == VT_ST_OBSERVED || r->state == VT_ST_NEW) && (r->flags & VT_F_AT_REST);
+    if (holding && 4 * autoref_moved(K->ref, K->ref_col, K->ref_row, wc, wr) < wc * wr)
+        return;
+    int col, row;
+    if (!autoref_best(K->ref, wc, wr, &col, &row))
+        return;
+    K->ref_on = 1;
+    K->ref_col = col;
+    K->ref_row = row;
+    K->ref_wait = REF_EVERY;
+    K->cmd = VT_CMD_SELECT;
+    K->roi[0] = (float)(col * cw);
+    K->roi[1] = (float)(row * ch);
+    K->roi[2] = (float)(wc * cw);
+    K->roi[3] = (float)(wr * ch);
+    fprintf(stderr, "vt_view: %s: static reference at %d,%d\n", K->name, col * cw, row * ch);
 }
 
 static void *capture_main(void *arg)
@@ -495,6 +535,9 @@ static void *link_main(void *arg)
                     K->cmd = VT_CMD_NONE;
                     A.pair_epoch++;
                 }
+                /* A reference is not the thing: nothing is estimated from it. */
+                if (K->ref_on)
+                    m.dest = (uint16_t)(VT_PIPE_PYR | VT_PIPE_FLOW);
                 if (k == 0) {
                     if (A.view_level != debug_sent) {
                         m.sc_key = VT_SC_DEBUG_LEVEL;
@@ -586,7 +629,7 @@ static void *link_main(void *arg)
                     fflush(track_csv);
                 }
             }
-            if (k >= 1 && !generated) {
+            if (k >= 1 && !generated && !A.c[0].ref_on && !K->ref_on) {
                 if (!pf[k])
                     pf[k] = fopen(k == 1 ? PAIRS_LR_PATH : PAIRS_LD_PATH, "a");
                 if (pf[k])
@@ -629,6 +672,8 @@ static void *link_main(void *arg)
                 pthread_mutex_lock(&A.m);
                 A.cells_at[cv][cm.slot] = (struct cells_plane){cm.instance, cm.cols, cm.rows, cm.level, 1u};
                 A.cells_count[cv]++;
+                if (A.ref)
+                    ref_step(&A.c[cv], (const struct vt_cell *)(const void *)(A.l.part + vt_cells_offset((uint32_t)cv, cm.slot)), &cm);
                 pthread_mutex_unlock(&A.m);
             }
         }
@@ -796,12 +841,16 @@ static void draw_view(struct x11view *v, int ox, int oy, const struct cam *K, co
     const double s = K->vs;
     const int ex0 = show_x(ox, K->vw, (double)(r->cx - 0.5f * r->w) * s), ex1 = show_x(ox, K->vw, (double)(r->cx + 0.5f * r->w) * s);
     const int x0 = ex0 < ex1 ? ex0 : ex1, x1 = ex0 < ex1 ? ex1 : ex0, y0 = oy + (int)((double)(r->cy - 0.5f * r->h) * s), y1 = oy + (int)((double)(r->cy + 0.5f * r->h) * s);
-    outline_line(v, x0, y0, x1, y0, WHITE, pred);
-    outline_line(v, x1, y0, x1, y1, WHITE, pred);
-    outline_line(v, x1, y1, x0, y1, WHITE, pred);
-    outline_line(v, x0, y1, x0, y0, WHITE, pred);
+    const uint32_t box = K->ref_on ? GREY : WHITE; /* a reference is no selection: the operator's boxes stand out */
+    outline_line(v, x0, y0, x1, y0, box, pred);
+    outline_line(v, x1, y0, x1, y1, box, pred);
+    outline_line(v, x1, y1, x0, y1, box, pred);
+    outline_line(v, x0, y1, x0, y0, box, pred);
     char tag[64];
-    snprintf(tag, sizeof tag, "REGION %u  %s", r->track_id, pred ? "PREDICTED, NOT MEASURED" : state_name(r->state));
+    if (K->ref_on)
+        snprintf(tag, sizeof tag, "STATIC REFERENCE  %s", state_name(r->state));
+    else
+        snprintf(tag, sizeof tag, "REGION %u  %s", r->track_id, pred ? "PREDICTED, NOT MEASURED" : state_name(r->state));
     text_outlined(v, x0, y0 - 20 < oy ? y0 + 4 : y0 - 20, 2, WHITE, tag);
     for (unsigned k = 0; k < r->nfeat; k++) {
         const struct vt_feat_out *f = &r->feat[k];
@@ -984,10 +1033,15 @@ static void apply_command_file(void)
     pthread_mutex_lock(&A.m);
     if (sscanf(line, "select %d %f %f %f %f", &cam, &r[0], &r[1], &r[2], &r[3]) == 5 && cam >= 0 && cam < A.ncam) {
         A.c[cam].cmd = VT_CMD_SELECT;
+        A.c[cam].ref_on = 0;
+        A.c[cam].ref_mine = 1;
         memcpy(A.c[cam].roi, r, sizeof r);
     } else if (!strncmp(line, "deselect", 8)) {
         for (int k = 0; k < A.ncam; k++)
+        {
             A.c[k].cmd = VT_CMD_DESELECT;
+            A.c[k].ref_on = A.c[k].ref_mine = A.c[k].ref_wait = 0;
+        }
     } else if (sscanf(line, "view %d", &n) == 1) {
         A.view_level = n;
     } else if (!strncmp(line, "snap", 4)) {
@@ -1351,6 +1405,7 @@ int main(int argc, char **argv)
     A.lr_gen = 1; /* 60, 60 and 29 a second with FSR running, measured 2026-11-03: --lr-gen 0 gives the card back if it is ever short */
     A.fsr_sharp = 0.4f; /* AMD: (1 - 0.8) x 2 stops, its sample's default */
     A.vec = 1;
+    A.ref = 1;
     A.fsr_cam = 2;
     int at_x = -1, at_y = -1;
     for (int i = 1; i < argc; i++) {
@@ -1363,6 +1418,7 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--dev3") && i + 1 < argc) d->dev = argv[++i];
         else if (!strcmp(argv[i], "--size3") && i + 1 < argc) sscanf(argv[++i], "%dx%d", &d->w, &d->h);
         else if (!strcmp(argv[i], "--fps3") && i + 1 < argc) d->fps = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--ref") && i + 1 < argc) A.ref = atoi(argv[++i]) != 0;
         else if (!strcmp(argv[i], "--rate") && i + 1 < argc) a->rate = atof(argv[++i]);
         else if (!strcmp(argv[i], "--rate2") && i + 1 < argc) b->rate = atof(argv[++i]);
         else if (!strcmp(argv[i], "--rate3") && i + 1 < argc) d->rate = atof(argv[++i]);
@@ -1470,6 +1526,8 @@ int main(int argc, char **argv)
                 if (xb - xa >= 16 && yb - ya >= 16) {
                     pthread_mutex_lock(&A.m);
                     A.c[drag_cam].cmd = VT_CMD_SELECT;
+                    A.c[drag_cam].ref_on = 0;
+                    A.c[drag_cam].ref_mine = 1;
                     /* In the camera's own pixels, whatever size its pane is. */
                     const double dsc = A.c[drag_cam].vs;
                     A.c[drag_cam].roi[0] = (float)(xa / dsc);
@@ -1482,11 +1540,16 @@ int main(int argc, char **argv)
                 pthread_mutex_lock(&A.m);
                 if (e.type == X11_PRESS) {
                     const int at = pane_at(e.x, e.y);
-                    if (at >= 0)
+                    if (at >= 0) {
                         A.c[at].cmd = VT_CMD_DESELECT;
+                        A.c[at].ref_on = A.c[at].ref_mine = A.c[at].ref_wait = 0;
+                    }
                 } else {
                     for (int k = 0; k < A.ncam; k++)
+                    {
                         A.c[k].cmd = VT_CMD_DESELECT;
+                        A.c[k].ref_on = A.c[k].ref_mine = A.c[k].ref_wait = 0;
+                    }
                 }
                 pthread_mutex_unlock(&A.m);
             } else if (e.type == X11_KEY) {
@@ -1669,7 +1732,7 @@ int main(int argc, char **argv)
             if (!caps[k])
                 text_outlined(&v, ox + 8, oy + 8, 2, WHITE, K->state ? "no frames" : "waiting for the device");
         }
-        if (tracking && (r[0].state == VT_ST_OBSERVED || r[0].state == VT_ST_NEW)) {
+        if (tracking && !A.c[0].ref_on && (r[0].state == VT_ST_OBSERVED || r[0].state == VT_ST_NEW)) {
             if (A.ncam >= 2 && calib.valid && (dirty & 2u))
                 draw_epipolar(&v, &calib, &r[0], calib.R, calib.T, calib.fb, calib.cxb, calib.cyb, b, pane[1].x, pane[1].y);
             if (A.ncam == 3 && calib.valid && calib.valid_d && (dirty & 4u))
@@ -1791,7 +1854,7 @@ int main(int argc, char **argv)
                 panel_line(&v, &y, GREY, "rays %.1f deg apart, miss %.1f px, gap %.1f ms", r[1].parallax_deg, r[1].reproj_rms, r[1].pair_gap_ms);
                 panel_line(&v, &y, DIM, "%.72s", calib_note);
             } else {
-                panel_line(&v, &y, GREY, "UNAVAILABLE: select the region in L and in R");
+                panel_line(&v, &y, GREY, A.c[0].ref_on || A.c[1].ref_on ? "UNAVAILABLE: L, R hold static references. Draw a box on each to measure" : "UNAVAILABLE: select the region in L and in R");
             }
             panel_line(&v, &y, DIM, "correspondences %llu  contrast %s  blur %s", (unsigned long long)pairs, contrast ? "on" : "off", pre_gauss ? "on" : "off");
             if (A.fsr)

@@ -4,6 +4,10 @@ Current as of 2026-11-03 17:40. Numbers and their sources: [measurements.md](mea
 
 ## Failing, or not built
 
+- **Camera D misses 24 pictures a second, and halving L and R's vectors did not cure it.** 18.17 to 18.33 a second over 30 s, 20 to 23 % of real frames skipped, against 19.60 before. L and R's flow, the tracker, the maps and FSR want about 1,356 ms a second of the same cores' time (arithmetic). L and R's doubling, about 362 ms of that, is the largest thing left to give.
+- **By default there is no 3D of the thing.** It needs a box drawn on it in both L and R. Those now hold static references until told otherwise, and say so in the panel.
+- **Nothing reads the static references yet.** They are chosen, held and shown. What they should correct in D is not built.
+- **The static references have only been seen for 70 s.** Two chosen in that time, with 36 s of over 800 cells moving, neither replaced. Real disturbance of a chosen region has been tried only in `autoref_check`.
 - **Holding only to the box costs a few scenes some precision.** Centre median, old to new: `rotate` 2.585 to 3.477 px, `offbox` 1.858 to 2.595, `offjointed` 6.981 to 7.433, `smallbox` 1.001 to 1.021. Better on others ([measurements.md](measurements.md)). It has not been judged on real targets.
 - **`scripts/check.sh` has not been run over this state.** Its last full run, 2026-11-03 16:13, read 69 passed and 6 failed (`logs/check/20261103-161345.txt`): all six the 3D honesty gate, since changed, and passing on the host but not rerun on the card. Its FSR and `vt_vd` gates have never run inside it. Run by hand on the card: FSR's chain against the host at two sizes, and `vt_vd`, both identical.
 - **L and R's kept frames are not evenly spaced.** Neither device has a 24 mode at 1080p, and a mode change could move the view or the exposure, so 24 are kept of their 30 by capture time: gaps of about 33, 33, 33 and 66 ms. D's 12 are kept of its 25, 80 ms apart with one gap of 120 ms a second, its exposure held to the rate at the operator's word: 33.8 ms where it had been 67.1, gain unchanged, so about half as bright.
