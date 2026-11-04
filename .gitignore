@@ -42,3 +42,4 @@ input/refs/*/
 *.stl
 *.glb
 *.gltf
+third_party/

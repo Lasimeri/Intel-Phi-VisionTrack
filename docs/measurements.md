@@ -778,3 +778,5 @@ Each doubled: 48, 48 and 25 a second. Device modes from `v4l2-ctl --list-formats
 | over 800 | 27 | 48.0, 48.0, 21.4 | 23.5, 23.3, 12.4 | 12.4 | 42.79 |
 
 Over the last 30 s: 48.03, 48.00 and 23.17 shown a second, capture to screen 80.4, 80.7 and 200.3 ms, D's at its limit of 2.5 frames. D's real frames: 908 shown, 26 skipped. **D at 23.17 of 25 is short of the order.**
+
+**D at 12, the operator's correction (18:41 to 18:43, `logs/live/rates-20261103-184141.csv`, 90 s).** Doubled to 24. By cells moving: under 300, shown 47.3, 47.3, 23.4; 300 to 800, 47.9, 47.9, 22.4; over 800, 47.9, 47.9, 21.2. Orange 23.1 to 24.0 on L and R, 11.8 to 12.0 on D; maps 11.8 to 12.0; capture to result 43 ms. Over the last 30 s: 48.03, 47.97, 23.90 shown a second, capture to screen 81.5, 79.9, 202.7 ms. D's real frames: 880 shown, 24 skipped.
